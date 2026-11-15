@@ -7,7 +7,7 @@
 KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 
 - 后端：Python 3.11+、FastAPI、Uvicorn、httpx，使用 uv 管理环境。
-- 前端：原生 HTML / CSS / JavaScript，无构建步骤；脚本按 `md.js` → `api.js` → `ui.js` → `highlight.js` → `views.js` → `app.js` 顺序加载。
+- 前端：原生 HTML / CSS / JavaScript，无构建步骤；`theme-init.js` 在 `<head>` 预置主题，主体脚本按 `md.js` → `api.js` → `ui.js` → `highlight.js` → `theme.js` → `views.js` → `app.js` 顺序加载。
 - 测试：pytest + 本地 Python Mock 上游，禁止使用真实 API Key 或访问外部模型服务。
 - 配置：保存在用户目录（Windows `%APPDATA%\KnowledgeLib\settings.json`），不要提交到仓库。
 - 运行时数据：`data/`（知识库、回收站、缓存）不进入版本控制。
@@ -64,7 +64,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 所有测试必须离线运行，只使用 `tests/mock_upstream.py` 或内存临时目录。
 - 不把真实 API Key 写进测试、命令、提交信息或日志。
 - 修 bug 时先补能复现问题的测试，再改实现；不允许通过删除/跳过测试让套件变绿。
-- 当前基线是 **76 个 pytest 用例**；新增功能应同步增加测试并更新 README 中的数量。
+- 当前基线是 **78 个 pytest 用例**；新增功能应同步增加测试并更新 README 中的数量。
 - 前端改动至少要被 `tests/test_static.py` 的 `node --check` 与 `byId` 检查覆盖。
 
 ## 版本控制纪律
@@ -85,6 +85,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
   其余组合必须在后端丢弃函数工具，不能直接发给 DeepSeek。
 - 知识库/学习路径重命名只改 `.kb.json` / `.path.json` 的 `name`，不改目录名、slug 与文件内容。
 - 前端静态资源改动后，提醒用户重启后端（若改 Python）并 Ctrl+F5；后端改动只刷新页面不会生效。
+- 主题/液态玻璃/无衬线开关只存浏览器 `localStorage`；liquidGL 本地 vendored 且为 MIT，CSP 需要 `worker-src 'self' blob:`。
 
 ## 本机环境备注
 

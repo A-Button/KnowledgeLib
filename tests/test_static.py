@@ -21,7 +21,11 @@ def test_required_assets_exist():
     for name in (
         "index.html",
         "assets/app.css",
+        "assets/theme.css",
         "assets/favicon.svg",
+        "assets/vendor/liquidGL.js",
+        "assets/js/theme-init.js",
+        "assets/js/theme.js",
         "assets/js/md.js",
         "assets/js/api.js",
         "assets/js/ui.js",
@@ -34,12 +38,12 @@ def test_required_assets_exist():
 
 def test_head_links_and_scripts_resolve():
     html = read(WEB / "index.html")
-    assert '<html lang="zh-CN">' in html
+    assert '<html lang="zh-CN" data-theme="archive">' in html
     assert "Content-Security-Policy" not in html
     refs = re.findall(r'(?:src|href)="(/assets/[^"]+)"', html)
     assert refs
     for ref in refs:
-        assert (WEB / ref.lstrip("/")).is_file(), ref
+        assert (WEB / ref.split("?", 1)[0].lstrip("/")).is_file(), ref
     assert not re.search(r'(?:src|href)="https?://', html)
     assert not re.search(r"<script(?![^>]*\bsrc=)", html)
 
@@ -50,6 +54,21 @@ def test_css_has_design_tokens():
         assert token in css
     assert "http://" not in css and "https://" not in css
     assert "@media (max-width: 860px)" in css
+
+
+
+
+def test_theme_assets_and_order():
+    html = read(WEB / "index.html")
+    assert 'data-theme="archive"' in html
+    assert html.index("/assets/js/theme-init.js") < html.index("/assets/app.css")
+    assert html.index("/assets/app.css") < html.index("/assets/theme.css")
+    assert html.index("/assets/js/theme.js") < html.index("/assets/js/views.js")
+    css = read(ASSETS / "theme.css")
+    for token in ('html[data-theme="modern"]', "html.no-serif", "glass-on", ".theme-picker"):
+        assert token in css, token
+    license_text = read(ASSETS / "vendor" / "liquidGL-LICENSE.txt")
+    assert "MIT License" in license_text
 
 
 def test_by_id_references_exist():

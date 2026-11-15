@@ -99,6 +99,7 @@
       if (token !== routeToken) return;
       KL.views.renderView();
       updateRail();
+      if (KL.theme) KL.theme.refresh();
     } catch (err) {
       if (token !== routeToken) return;
       var root = document.getElementById('view-root');
@@ -191,7 +192,7 @@
     refreshBase: refreshBase,
     updateRail: updateRail,
     applyRailCollapsed: applyRailCollapsed,
-    renderView: function () { KL.views.renderView(); updateRail(); }
+    renderView: function () { KL.views.renderView(); updateRail(); if (KL.theme) KL.theme.refresh(); }
   };
 
   if (document.readyState === 'loading') {

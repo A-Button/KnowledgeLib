@@ -128,11 +128,26 @@
         '', '对应 DeepSeek 官方 /v1/tools/search 与 /v1/tools/fetch。')
       + '</div>';
 
+    var appearance = KL.theme ? KL.theme.get() : { theme: 'archive', glass: false, noSerif: false };
+    var modern = appearance.theme === 'modern';
     var right = '<div class="settings-stack">'
-      + card('使用顺序', '04',
+      + card('外观', '04',
+        '<div class="theme-picker">'
+        + '<button type="button" class="theme-choice' + (modern ? '' : ' is-on') + '" data-theme-choice="archive" aria-pressed="' + (modern ? 'false' : 'true') + '">'
+        + '<span class="theme-swatch theme-swatch--archive"></span><strong>档案室</strong><em>纸张 · 衬线 · 朱砂</em></button>'
+        + '<button type="button" class="theme-choice' + (modern ? ' is-on' : '') + '" data-theme-choice="modern" aria-pressed="' + (modern ? 'true' : 'false') + '">'
+        + '<span class="theme-swatch theme-swatch--modern"></span><strong>现代</strong><em>玻璃 · 圆角 · 冷色</em></button>'
+        + '</div>'
+        + '<label class="theme-checkline' + (modern ? '' : ' is-disabled') + '"><input type="checkbox" id="theme-glass"' + (appearance.glass ? ' checked' : '') + (modern ? '' : ' disabled') + '>'
+        + '<span><strong>液态玻璃</strong><small>使用 liquidGL 为阅读助手加玻璃质感；不支持 WebGL 时自动回退为 CSS 毛玻璃。侧栏与卡片本身使用 CSS 玻璃。</small></span></label>'
+        + '<label class="theme-checkline"><input type="checkbox" id="theme-no-serif"' + (appearance.noSerif ? ' checked' : '') + '>'
+        + '<span><strong>禁用衬线字体</strong><small>兼容性选项：标题、正文与引用全部改用无衬线字体。</small></span></label>'
+        + '<div class="theme-note hint" id="theme-note">' + (modern ? '现代主题已启用；液态玻璃可随时开关。' : '档案室主题保留纸张质感与衬线标题。') + '</div>',
+        '', '外观设置保存在本机浏览器，不会写入用户配置。')
+      + card('使用顺序', '05',
         '<ol class="md" style="padding-left:20px;margin:0"><li>保存模型配置并测试连接。</li><li>设置知识库根目录。</li><li>到文库新建知识库。</li><li>进入知识库，填写领域、周期与偏好，生成学习路径。</li></ol>',
         '', '生成会调用 1 次规划 + N 次讲义请求。')
-      + card('安全与边界', '05',
+      + card('安全与边界', '06',
         '<p class="settings-note">应用只监听 127.0.0.1；API Key 保存在用户配置目录，前端只拿到掩码。所有资料写入你配置的目录，删除采用软删除（data/trash）。</p>'
       + (settings.configPath ? '<p class="mono small muted" style="margin-top:10px;word-break:break-all">配置：' + esc(settings.configPath) + '</p>' : '')
         + '<p class="settings-note" style="margin-top:10px">DeepSeek Search / Fetch 是外部请求，会把搜索词与 URL 发送到接口服务商。</p>',
@@ -147,6 +162,24 @@
 
   function bindSettings(root) {
     var settings = KL.state.settings || {};
+    if (KL.theme) {
+      root.querySelectorAll('[data-theme-choice]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          KL.theme.setTheme(button.getAttribute('data-theme-choice'));
+          if (KL.app && KL.app.renderView) KL.app.renderView();
+        });
+      });
+      var glassToggle = byId('theme-glass');
+      if (glassToggle) glassToggle.addEventListener('change', function () {
+        KL.theme.setGlass(glassToggle.checked);
+        if (KL.app && KL.app.renderView) KL.app.renderView();
+      });
+      var serifToggle = byId('theme-no-serif');
+      if (serifToggle) serifToggle.addEventListener('change', function () {
+        KL.theme.setNoSerif(serifToggle.checked);
+        if (KL.app && KL.app.renderView) KL.app.renderView();
+      });
+    }
     root.querySelectorAll('[data-preset]').forEach(function (button) {
       button.addEventListener('click', function () {
         var base = button.getAttribute('data-preset');
@@ -1381,6 +1414,7 @@
     var collapsed = readerChatCollapsed();
     return '<aside class="reader-chat' + (collapsed ? ' is-collapsed' : '') + '" id="reader-chat">'
       + readerChatTab()
+      + '<div class="reader-glass" aria-hidden="true"></div>'
       + '<div class="reader-chat-main">' + readerChatInner(kb, path) + '</div></aside>';
   }
 
@@ -1401,7 +1435,8 @@
     var panel = byId('reader-chat');
     if (!panel) return;
     var collapsed = panel.classList.contains('is-collapsed');
-    panel.innerHTML = readerChatTab() + '<div class="reader-chat-main">' + readerChatInner(kb, path) + '</div>';
+    panel.innerHTML = readerChatTab() + '<div class="reader-glass" aria-hidden="true"></div>'
+      + '<div class="reader-chat-main">' + readerChatInner(kb, path) + '</div>';
     if (collapsed) panel.classList.add('is-collapsed');
     bindReaderChat(kb, path);
     var scroller = byId('reader-chat-scroll');

@@ -11,6 +11,7 @@ CSP = (
     "img-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; "
     "script-src 'self'; "
+    "worker-src 'self' blob:; "
     "connect-src 'self'; "
     "font-src 'self'; "
     "base-uri 'none'; "

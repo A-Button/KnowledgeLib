@@ -65,6 +65,17 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：思考开启
 - 联网增强 + 思考开启：服务端 `deepseek_web_search` 与编辑工具同时声明，这是 API 允许的组合。
 - 生成流程只有服务端工具，没有 client tools，不受此限制。
 
+## 主题与兼容性
+
+设置 → 外观：
+
+- **档案室**：默认主题，暖纸底色、衬线标题、朱砂与黄铜点缀。
+- **现代**：冷色渐变背景、圆角玻璃卡片、较大的标题与无衬线展示字体。
+- **液态玻璃**（仅现代主题）：启用 [liquidGL](https://github.com/naughtyduk/liquidGL) 为阅读助手加玻璃霜面与高光；不支持 WebGL、软件渲染或窄屏时自动回退为 CSS 玻璃。侧栏与卡片始终使用 CSS 玻璃。
+- **禁用衬线字体**：兼容性选项，把标题、正文、引用与界面文字全部切到无衬线字体。
+
+主题、液态玻璃与字体开关保存在本机浏览器的 `localStorage`，不写入用户配置文件，也不影响不同设备。
+
 ## 快速开始
 
     uv sync
@@ -168,7 +179,7 @@ UI 已不再提供独立的联网调试页；/api/web/* 作为代理接口保留
 
 ## 测试（不使用真实 Key）
 
-全部测试使用本地 Python Mock 上游（tests/mock_upstream.py），只监听 127.0.0.1，不访问外网；当前共 76 个 pytest 用例：
+全部测试使用本地 Python Mock 上游（tests/mock_upstream.py），只监听 127.0.0.1，不访问外网；当前共 78 个 pytest 用例：
 
     uv run pytest -q
     uv run python tools/selfcheck.py
@@ -188,6 +199,7 @@ UI 已不再提供独立的联网调试页；/api/web/* 作为代理接口保留
 - read / edit / write / highlight 文档工具与编号规范、编辑备份、路径穿越拒绝
 - highlight 匹配器：跨行、跨行内代码/粗体/链接、Markdown 标记剥离
 - 静态资源、JS 语法、byId 引用、启动脚本守卫
+- 主题资源顺序、现代主题/无衬线 CSS、liquidGL 许可与 CSP worker 放行
 
 Mock 也可以单独启动，用于无 Key 的界面演示：
 
@@ -235,6 +247,11 @@ SSE 对话事件：meta、tool、sources、reasoning、delta、doc、highlight�
     web/                  原生前端
     tests/                Mock 与测试
     tools/selfcheck.py    一键静态检查 + 全量测试
+
+## 第三方资源
+
+- [liquidGL](https://github.com/naughtyduk/liquidGL) v3.0.0，MIT License（仅 `scripts/` 源码；作者 NaughtyDuk）。本仓库内置一份于 `web/assets/vendor/liquidGL.js`，许可原文见 `web/assets/vendor/liquidGL-LICENSE.txt`。
+- 其余图标为内联 SVG；界面不依赖外部 CDN、字体或图片。
 
 ## 设计说明
 
