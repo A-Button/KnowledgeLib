@@ -2,6 +2,7 @@
 name = "knowledgelib"
 version = "0.1.0"
 description = "Local learning-path generator and knowledge-base chat app"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
