@@ -1,0 +1,12 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+docs/screenshots/.tmp/
+
+.DS_Store
+Thumbs.db
+*.log

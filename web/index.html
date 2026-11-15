@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="KnowledgeLib 私人文库：输入学习领域、时间与偏好，生成一套带编号的学习路径与 Markdown 资料。">
+  <title>KnowledgeLib · 私人文库</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail">
+      <a class="brand" href="#/library" aria-label="KnowledgeLib 文库">
+        <svg class="brand-mark" viewBox="0 0 44 48" fill="none" aria-hidden="true">
+          <path d="M5 4h24a9 9 0 0 1 9 9v31H14A9 9 0 0 1 5 35Z" fill="#f4eddf"/>
+          <path d="M5 31a9 9 0 0 1 9-9h24v13H14a9 9 0 0 1-9-9Z" fill="#b23a2b"/>
+          <path d="M14 12h14M14 18h10" stroke="#191512" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+        <span class="brand-text"><strong>KnowledgeLib</strong><em>PRIVATE ARCHIVE</em></span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a class="nav-link" href="#/library" data-nav="library">
+          <svg class="nav-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h4v14H4zM8 5h4v14H8zM13 5l4 1-3 13-4-1z"/></svg>
+          <span class="nav-label">文库</span><span class="nav-no">01</span>
+        </a>
+        <a class="nav-link" href="#/settings" data-nav="settings">
+          <svg class="nav-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+          <span class="nav-label">设置</span><span class="nav-no">02</span>
+        </a>
+      </nav>
+      <button class="rail-toggle" id="rail-toggle" type="button" aria-expanded="true" title="收起侧边栏">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6 9 12l6 6"/><path d="M20 5v14"/></svg>
+        <span class="rail-toggle-label">收起侧栏</span>
+      </button>
+      <div class="rail-note">
+        <div class="stamp" id="conn-stamp">正在连接</div>
+        <p id="rail-model">—</p>
+      </div>
+      <div class="rail-foot"><span>STUDY ARCHIVE</span><span>V0.1</span></div>
+    </aside>
+    <main class="main">
+      <div id="view-root" class="view-root">
+        <div class="page"><div class="empty"><div class="empty-mark">LOADING</div><h3>正在打开档案室…</h3><p>读取设置与知识库列表。</p></div></div>
+      </div>
+    </main>
+  </div>
+  <div id="drawer-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+  <script src="/assets/js/md.js" defer></script>
+  <script src="/assets/js/api.js" defer></script>
+  <script src="/assets/js/ui.js" defer></script>
+  <script src="/assets/js/highlight.js" defer></script>
+  <script src="/assets/js/views.js" defer></script>
+  <script src="/assets/js/app.js" defer></script>
+</body>
+</html>
