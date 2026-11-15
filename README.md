@@ -98,7 +98,8 @@ pyproject.toml 默认使用 USTC 镜像。切换 TUNA：
 4. 进入知识库 → 新建学习路径：填领域、周期、每周小时、基础水平、目标标签、偏好要求与模块数。
 5. 生成进度页可以取消；完成后进入阅读工作台，文件按编号排列。
 6. 阅读工作台：上方编号条切换文件，右侧「阅读助手」提供仅知识库 / 联网增强 / 纯对话三种模式；当前文件会自动作为上下文。
-7. 右侧阅读助手和左侧主导航都可以展开或收起，状态会记在浏览器里。
+7. 知识库页和学习路径页都有「重命名」按钮，只改显示名称，不改磁盘目录名与文件内容。
+8. 右侧阅读助手和左侧主导航都可以展开或收起，状态会记在浏览器里。
 
 ### 首次使用建议值
 
@@ -167,7 +168,7 @@ UI 已不再提供独立的联网调试页；/api/web/* 作为代理接口保留
 
 ## 测试（不使用真实 Key）
 
-全部测试使用本地 Python Mock 上游（tests/mock_upstream.py），只监听 127.0.0.1，不访问外网；当前共 74 个 pytest 用例：
+全部测试使用本地 Python Mock 上游（tests/mock_upstream.py），只监听 127.0.0.1，不访问外网；当前共 76 个 pytest 用例：
 
     uv run pytest -q
     uv run python tools/selfcheck.py
@@ -176,7 +177,7 @@ UI 已不再提供独立的联网调试页；/api/web/* 作为代理接口保留
 覆盖内容：
 
 - 设置、Key 掩码、环境变量优先级、坏 JSON 自愈
-- 知识库 / 学习路径目录、软删除、路径穿越拒绝
+- 知识库 / 学习路径目录、重命名、软删除、路径穿越拒绝
 - 中文 BM25 检索、分块、缓存失效
 - 规划 JSON 解析与修复、编号标题、总览模板、并发生成
 - 讲义失败 → 部分完成 → 续生成
@@ -203,10 +204,10 @@ Mock 也可以单独启动，用于无 Key 的界面演示：
 | POST | /api/settings/test | 1 条 ping 消息测试模型 |
 | POST | /api/settings/test-web | Search + Fetch 各一次 |
 | GET / POST | /api/kbs | 列出 / 新建知识库 |
-| GET / DELETE | /api/kbs/{id} | 详情 / 软删除 |
+| GET / PUT / DELETE | /api/kbs/{id} | 详情 / 重命名 / 软删除 |
 | POST | /api/kbs/{id}/paths | 生成学习路径（SSE） |
 | POST | /api/kbs/{id}/paths/{pathId}/resume | 续生成（SSE） |
-| GET / DELETE | /api/kbs/{id}/paths/{pathId} | 路径详情 / 软删除 |
+| GET / PUT / DELETE | /api/kbs/{id}/paths/{pathId} | 路径详情 / 重命名 / 软删除 |
 | GET | /api/kbs/{id}/file?path=&name= | 读取 .md |
 | GET | /api/kbs/{id}/search?q=&topK= | 检索预览 |
 | POST | /api/kbs/{id}/reindex | 重建索引 |

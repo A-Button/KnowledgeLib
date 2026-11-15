@@ -106,6 +106,33 @@ def test_delete_moves_to_trash(tmp_path):
     assert Path(result["trashedTo"]).parent.name == "trash"
 
 
+
+
+def test_rename_kb_and_path(tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    meta = library.create_kb(root, "旧库名")
+    kb_dir = root / meta["slug"]
+    renamed = library.rename_kb(root, meta["id"], "新库名")
+    assert renamed["name"] == "新库名"
+    assert kb_dir.name == meta["slug"]
+    assert library.kb_detail(root, meta["id"])["name"] == "新库名"
+
+    ref = library.create_generated_path(kb_dir, {"domain": "Rust"}, "旧路径名", "mock")
+    ref.meta["status"] = "complete"
+    library.write_path_meta(ref.directory, ref.meta)
+    updated = library.rename_path(kb_dir, ref.id, "新路径名")
+    assert updated.name == "新路径名"
+    assert updated.directory.name == ref.directory.name
+    assert library.find_path(kb_dir, ref.id).name == "新路径名"
+
+    for bad in ("", "   ", "x" * 61):
+        with pytest.raises(ApiError):
+            library.rename_kb(root, meta["id"], bad)
+        with pytest.raises(ApiError):
+            library.rename_path(kb_dir, ref.id, bad)
+
+
 def test_list_md_files_sorted_and_numbered(tmp_path):
     directory = tmp_path / "path"
     directory.mkdir()

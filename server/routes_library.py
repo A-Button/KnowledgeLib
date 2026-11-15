@@ -24,6 +24,11 @@ class KbCreate(BaseModel):
     description: str = ""
 
 
+class RenameRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+
+
 class GenerateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     domain: str
@@ -116,6 +121,14 @@ def get_kb(kb_id: str, request: Request) -> dict[str, Any]:
     return library.kb_detail(state.config.kb_root(), kb_id)
 
 
+@router.put("/{kb_id}")
+def rename_kb(kb_id: str, payload: RenameRequest, request: Request) -> dict[str, Any]:
+    state = get_state(request)
+    root = state.config.kb_root()
+    library.rename_kb(root, kb_id, payload.name)
+    return library.kb_detail(root, kb_id)
+
+
 @router.delete("/{kb_id}")
 def delete_kb(kb_id: str, request: Request) -> dict[str, Any]:
     state = get_state(request)
@@ -203,6 +216,14 @@ def get_path(kb_id: str, path_id: str, request: Request) -> dict[str, Any]:
     state = get_state(request)
     kb_dir = _kb_dir(state, kb_id)
     ref = library.find_path(kb_dir, path_id)
+    return library.path_public(ref)
+
+
+@router.put("/{kb_id}/paths/{path_id}")
+def rename_path(kb_id: str, path_id: str, payload: RenameRequest, request: Request) -> dict[str, Any]:
+    state = get_state(request)
+    kb_dir = _kb_dir(state, kb_id)
+    ref = library.rename_path(kb_dir, path_id, payload.name)
     return library.path_public(ref)
 
 

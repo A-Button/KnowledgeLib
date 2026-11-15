@@ -132,7 +132,7 @@ def scan_kbs(root: Path) -> list[dict[str, Any]]:
         paths = iter_paths(child)
         file_count = sum(len(ref.files) for ref in paths)
         total_bytes = sum(f["bytes"] for ref in paths for f in ref.files)
-        updated = None
+        updated = meta.get("updatedAt") or meta.get("createdAt")
         for ref in paths:
             updated = max(updated, ref.updated_at) if updated else ref.updated_at
         result.append(
@@ -339,6 +339,37 @@ def kb_detail(root: Path, kb_id: str) -> dict[str, Any]:
         "paths": paths,
         "pathCount": len(paths),
     }
+
+
+def _display_name(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ApiError(400, "invalid_request", f"{field}必须是字符串")
+    name = value.strip()
+    if not name:
+        raise ApiError(400, "invalid_request", f"{field}不能为空")
+    if len(name) > 60:
+        raise ApiError(400, "invalid_request", f"{field}不能超过 60 字符")
+    if any(ord(ch) < 32 for ch in name):
+        raise ApiError(400, "invalid_request", f"{field}不能包含控制字符")
+    return name
+
+
+def rename_kb(root: Path, kb_id: str, name: str) -> dict[str, Any]:
+    kb_dir = find_kb(root, kb_id)
+    meta = read_kb_meta(kb_dir)
+    meta["name"] = _display_name(name, "知识库名称")
+    meta["updatedAt"] = _now()
+    meta.pop("_kind", None)
+    write_json_atomic(kb_dir / KB_META, meta)
+    return meta
+
+
+def rename_path(kb_dir: Path, path_id: str, name: str) -> PathRef:
+    ref = find_path(kb_dir, path_id)
+    if ref.status in ("planning", "generating"):
+        raise ApiError(409, "conflict", "该学习路径正在生成，暂不能重命名")
+    update_path_meta(ref, name=_display_name(name, "学习路径名称"))
+    return ref
 
 
 def create_generated_path(

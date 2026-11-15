@@ -323,6 +323,50 @@
     byId('kb-name').addEventListener('keydown', function (event) { if (event.key === 'Enter') submit(); });
   }
 
+  function openRenameDialog(options) {
+    var modal = KL.ui.modal({
+      title: options.title,
+      sub: '只修改显示名称；磁盘目录名与文件内容不受影响。',
+      body: field('名称', input(options.inputId, options.current, '请输入新的名称'))
+        + '<div class="form-error" id="rename-error" hidden></div>',
+      footer: '<button class="btn btn-ghost" data-close>取消</button>'
+        + '<button class="btn btn-primary" id="rename-save">保存</button>'
+    });
+    var inputNode = modal.root.querySelector('#' + options.inputId);
+    var error = modal.root.querySelector('#rename-error');
+    var button = modal.root.querySelector('#rename-save');
+    var submit = async function () {
+      error.hidden = true;
+      var name = inputNode.value.trim();
+      if (!name) {
+        error.textContent = '名称不能为空';
+        error.hidden = false;
+        inputNode.focus();
+        return;
+      }
+      button.disabled = true;
+      try {
+        await options.save(name);
+        modal.close();
+        KL.ui.toast(options.toast, 'ok');
+        KL.app.route();
+      } catch (err) {
+        error.textContent = err.message || '重命名失败';
+        error.hidden = false;
+        button.disabled = false;
+      }
+    };
+    button.addEventListener('click', submit);
+    inputNode.addEventListener('click', function () { inputNode.select(); });
+    inputNode.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    });
+    setTimeout(function () { inputNode.select(); }, 60);
+  }
+
   // ------------------------------------------------------------- kb detail
   function moduleGoalChips() {
     var goals = [
@@ -344,6 +388,7 @@
     var hasKey = !!(settings.api && settings.api.hasApiKey);
     var deepseek = !!(settings.api && settings.api.provider === 'deepseek');
     var actions = '<a class="btn btn-ghost" href="#/library">' + icon('arrowLeft') + '返回文库</a>'
+      + '<button class="btn btn-ghost" id="rename-kb">' + icon('edit') + '重命名</button>'
       + '<button class="btn btn-danger btn-sm" id="delete-kb">' + icon('trash') + '删除知识库</button>';
     var head = pageHead('LIBRARY / ' + (kb.name || '知识库'), esc(kb.name || '知识库'),
       kb.description || '在下面填写学习需求，生成一条编号学习路径。', actions);
@@ -443,6 +488,17 @@
       KL.views.startGeneration(kb.id, payload);
     });
 
+    byId('rename-kb').addEventListener('click', function () {
+      openRenameDialog({
+        title: '重命名知识库',
+        inputId: 'rename-kb-name',
+        current: kb.name || '',
+        save: function (name) {
+          return KL.api.put('/api/kbs/' + encodeURIComponent(kb.id), { name: name });
+        },
+        toast: '知识库已重命名'
+      });
+    });
     byId('delete-kb').addEventListener('click', async function () {
       if (!(await KL.ui.confirm({ title: '删除知识库', message: '会把整个「' + kb.name + '」目录移动到 data/trash，可在磁盘恢复。', danger: true, confirmText: '删除' }))) return;
       try {
@@ -454,7 +510,7 @@
     });
   }
 
-  KL.views = { renderSettings: renderSettings, bindSettings: bindSettings, renderLibrary: renderLibrary, bindLibrary: bindLibrary, renderKb: renderKb, bindKb: bindKb };
+  KL.views = { renderSettings: renderSettings, bindSettings: bindSettings, renderLibrary: renderLibrary, bindLibrary: bindLibrary, renderKb: renderKb, bindKb: bindKb, openRenameDialog: openRenameDialog };
   KL.views.part1Ready = true;
 })(window.KL = window.KL || {});
 
@@ -705,6 +761,7 @@
     var actions = '<a class="btn btn-ghost" href="#/library/' + encodeURIComponent(kb.id) + '">' + icon('arrowLeft') + '返回知识库</a>'
       + '<button class="btn btn-ghost" id="path-chat-toggle">' + icon('chat') + '阅读助手</button>'
       + '<button class="btn btn-ghost" id="path-refresh">' + icon('refresh') + '刷新</button>'
+      + '<button class="btn btn-ghost" id="path-rename">' + icon('edit') + '重命名</button>'
       + (path.status !== 'complete' && path.status !== 'external'
         ? '<button class="btn btn-accent" id="path-resume">' + icon('spark') + '继续生成</button>' : '')
       + '<button class="btn btn-danger btn-sm" id="path-delete">' + icon('trash') + '删除</button>';
@@ -821,6 +878,17 @@
       setReaderChatCollapsed(panel, !panel.classList.contains('is-collapsed'));
     });
     byId('path-refresh').addEventListener('click', function () { KL.app.route(); });
+    byId('path-rename').addEventListener('click', function () {
+      KL.views.openRenameDialog({
+        title: '重命名学习路径',
+        inputId: 'rename-path-name',
+        current: path.name || '',
+        save: function (name) {
+          return KL.api.put('/api/kbs/' + encodeURIComponent(kb.id) + '/paths/' + encodeURIComponent(path.id), { name: name });
+        },
+        toast: '学习路径已重命名'
+      });
+    });
     byId('path-delete').addEventListener('click', async function () {
       if (!(await KL.ui.confirm({ title: '删除学习路径', message: '整个目录会移动到 data/trash，可在磁盘恢复。', danger: true, confirmText: '删除' }))) return;
       try {
