@@ -90,6 +90,13 @@ async def test_git_api_lifecycle(client, tmp_path: Path):
     assert bad.status_code == 400
     assert bad.json()["error"]["code"] == "invalid_request"
 
+    gh_settings = await client.put(
+        f"/api/kbs/{kb['id']}/git/settings",
+        json={"pullCommand": "gh repo sync A-Button/KnowledgeLib"},
+    )
+    assert gh_settings.status_code == 200, gh_settings.text
+    assert gh_settings.json()["settings"]["pullCommand"].startswith("gh ")
+
     missing = await client.get("/api/kbs/not-a-real-kb/git")
     assert missing.status_code == 404
 

@@ -496,7 +496,7 @@
         + '<label class="check-line"><input type="checkbox" id="git-auto-commit"' + (settings.autoCommit === false ? '' : ' checked') + '> <span>同步前自动提交本地改动</span></label>'
         + '</div>'
         + '<details class="git-advanced"><summary>自定义推送 / 拉取命令（可选）</summary>'
-        + '<p class="hint">命令必须以 <span class="mono">git</span> 开头，不经过 shell；支持占位符 <span class="mono">{branch}</span>、<span class="mono">{remote}</span>、<span class="mono">{url}</span>、<span class="mono">{kb}</span>。留空则使用内置的 fetch/merge 与 push。</p>'
+        + '<p class="hint">命令必须以 <span class="mono">git</span> 或 <span class="mono">gh</span> 开头，不经过 shell；gh 需已安装并登录。支持占位符 <span class="mono">{branch}</span>、<span class="mono">{remote}</span>、<span class="mono">{url}</span>、<span class="mono">{kb}</span>。留空则使用内置的 fetch/merge 与 push。</p>'
         + '<div class="form-grid">'
         + '<div class="span-2">' + field('自定义拉取命令', input('git-pull-command', settings.pullCommand || '', 'git pull --rebase origin {branch}')) + '</div>'
         + '<div class="span-2">' + field('自定义推送命令', input('git-push-command', settings.pushCommand || '', 'git push origin {branch}')) + '</div>'

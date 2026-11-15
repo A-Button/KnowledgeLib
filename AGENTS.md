@@ -88,7 +88,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 前端静态资源改动后，提醒用户重启后端（若改 Python）并 Ctrl+F5；后端改动只刷新页面不会生效。
 - 主题/液态玻璃/无衬线开关只存浏览器 `localStorage`；liquidGL 本地 vendored 且为 MIT，CSP 需要 `worker-src 'self' blob:`。
 - Git 同步设置（自动同步、间隔、方向、冲突策略、自定义命令）只存用户配置目录的 `git-sync.json`；remote 存在知识库的 `.git/config`，不得写进 `.kb.json` 或提交进仓库。
-- 自定义 Git 命令必须以 `git` 开头、不经 shell 执行，并拒绝 `-C` / `--git-dir` / `--work-tree` 等切仓参数；错误信息中的 remote URL 要脱敏。
+- 自定义 Git 命令必须以 `git` 或 `gh` 开头、不经 shell 执行，并拒绝 `-C` / `--git-dir` / `--work-tree` 等切仓参数；`gh` 通过 `KL_GH_PATH` / PATH / 常见安装目录解析，错误信息中的 remote URL 要脱敏。
 - 后台自动同步线程只在服务 lifespan 内启动；测试用临时裸仓库，不得访问 GitHub 等外部远端。
 
 ## 本机环境备注

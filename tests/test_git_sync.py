@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -181,6 +182,14 @@ def test_custom_commands_and_settings(tmp_path: Path):
     assert result["ok"] is True
     assert "已用自定义命令拉取" in result["message"]
 
+    assert validate_command("gh repo sync owner/repo --source main", "命令")
+    assert validate_command("gh api --jq '.name | .id' repos/A-Button/KnowledgeLib", "命令")
+    service._gh = lambda: sys.executable
+    gh_parts = service._command_parts("gh -c \"print('gh-ok')\"", "main", "origin", kb_dir)
+    code, out, _ = service._run_custom(gh_parts, kb_dir, timeout=30)
+    assert code == 0
+    assert "gh-ok" in out
+
     with pytest.raises(ApiError):
         service.update_settings(meta["id"], {"intervalMinutes": 0})
     with pytest.raises(ApiError):
@@ -237,3 +246,4 @@ def test_validation_and_missing_remote(tmp_path: Path):
         validate_command("git --work-tree=D:/other status", "命令")
     with pytest.raises(ApiError):
         service.init_repo(kb_dir, meta["id"], "", "bad branch")
+    assert GitService(tmp_path / "env-config", {"PROGRAMFILES": "X:/Program Files"})._env_value("ProgramFiles") == "X:/Program Files"

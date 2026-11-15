@@ -42,7 +42,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "lastDirection": "",
 }
 
-_COMMAND_FORBIDDEN = (";", "|", ">", "<", chr(96), "$(")
+_COMMAND_FORBIDDEN = (";", ">", "<", chr(96), "$(")
 _COMMAND_BLOCKED_ARGS = {
     "-C",
     "--git-dir",
@@ -157,8 +157,8 @@ def validate_command(value: Any, field: str) -> str:
     if not parts:
         return ""
     executable = Path(parts[0]).name.lower()
-    if executable not in ("git", "git.exe"):
-        raise ApiError(400, "invalid_request", f"{field}必须以 git 开头，不能执行其他程序")
+    if executable not in ("git", "git.exe", "gh", "gh.exe"):
+        raise ApiError(400, "invalid_request", f"{field}必须以 git 或 gh 开头，不能执行其他程序")
     blocked_prefixes = (
         "-C",
         "--git-dir=",
@@ -315,18 +315,61 @@ class GitService:
                 "GCM_INTERACTIVE": "Never",
                 "GIT_PAGER": "cat",
                 "GIT_OPTIONAL_LOCKS": "0",
+                "GH_PROMPT_DISABLED": "1",
+                "GH_NO_UPDATE_NOTIFIER": "1",
+                "GH_PAGER": "cat",
+                "NO_COLOR": "1",
             }
         )
         return env
 
-    def _run(self, args: list[str], cwd: Path, timeout: float = 120.0) -> tuple[int, str, str]:
-        executable = self._git()
+    def _env_value(self, key: str) -> str:
+        if key in self.environ:
+            return str(self.environ.get(key) or "")
+        target = key.upper()
+        for env_key, value in self.environ.items():
+            if str(env_key).upper() == target:
+                return str(value or "")
+        return ""
+
+    def _gh(self) -> str:
+        override = self._env_value("KL_GH_PATH").strip()
+        candidates: list[str] = [override] if override else []
+        for name in ("gh", "gh.exe"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+        if os.name == "nt":
+            for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+                base = self._env_value(key).strip()
+                if base:
+                    candidates.append(str(Path(base) / "GitHub CLI" / "gh.exe"))
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                if Path(candidate).is_file():
+                    return candidate
+            except OSError:
+                continue
+        raise ApiError(400, "gh_unavailable", "未找到 GitHub CLI（gh）；请安装 gh，或设置 KL_GH_PATH")
+
+    def _run(
+        self,
+        args: list[str],
+        cwd: Path,
+        timeout: float = 120.0,
+        executable: str | None = None,
+    ) -> tuple[int, str, str]:
+        program = executable or self._git()
         options: dict[str, Any] = {}
         if os.name == "nt":
             options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             process = subprocess.run(
-                [executable, *args],
+                [program, *args],
                 cwd=str(cwd),
                 env=self._env(),
                 stdout=subprocess.PIPE,
@@ -335,10 +378,22 @@ class GitService:
                 **options,
             )
         except subprocess.TimeoutExpired:
-            raise ApiError(504, "git_timeout", f"Git 命令超过 {int(timeout)} 秒未完成")
+            raise ApiError(504, "git_timeout", f"命令超过 {int(timeout)} 秒未完成")
         except OSError as exc:
-            raise ApiError(400, "git_unavailable", f"无法运行 Git：{exc}")
+            raise ApiError(400, "git_unavailable", f"无法运行 {Path(program).name}：{exc}")
         return process.returncode, _decode(process.stdout), _decode(process.stderr)
+
+    def _run_custom(self, parts: list[str], cwd: Path, timeout: float = 180.0) -> tuple[int, str, str]:
+        if not parts:
+            raise ApiError(400, "invalid_request", "自定义命令不能为空")
+        program = Path(parts[0]).name.lower()
+        if program in ("git", "git.exe"):
+            executable = self._git()
+        elif program in ("gh", "gh.exe"):
+            executable = self._gh()
+        else:
+            raise ApiError(400, "invalid_request", "自定义命令必须以 git 或 gh 开头")
+        return self._run(parts[1:], cwd, timeout, executable=executable)
 
     def _managed(self, kb_dir: Path) -> bool:
         if not (Path(kb_dir) / ".git").exists():
@@ -725,7 +780,7 @@ class GitService:
         custom = (settings.get("pullCommand") or "").strip()
         if custom:
             parts = self._command_parts(custom, branch, remote_url, kb_dir)
-            code, out, err = self._run(parts, kb_dir, timeout=180)
+            code, out, err = self._run_custom(parts, kb_dir, timeout=180)
             conflicts = self._conflicts(kb_dir)
             if conflicts:
                 if strategy == "abort":
@@ -813,7 +868,7 @@ class GitService:
         custom = (settings.get("pushCommand") or "").strip()
         if custom:
             parts = self._command_parts(custom, branch, remote_url, kb_dir)
-            code, out, err = self._run(parts, kb_dir, timeout=180)
+            code, out, err = self._run_custom(parts, kb_dir, timeout=180)
             if code != 0:
                 raise self._remote_error("git_push_failed", "自定义推送命令失败", out, err, remote_url)
             return {"message": "已用自定义命令推送"}
@@ -831,8 +886,8 @@ class GitService:
 
     def _command_parts(self, command: str, branch: str, remote_url: str, kb_dir: Path) -> list[str]:
         parts = shlex.split(command, posix=True)
-        if not parts or Path(parts[0]).name.lower() not in ("git", "git.exe"):
-            raise ApiError(400, "invalid_request", "自定义命令必须以 git 开头")
+        if not parts or Path(parts[0]).name.lower() not in ("git", "git.exe", "gh", "gh.exe"):
+            raise ApiError(400, "invalid_request", "自定义命令必须以 git 或 gh 开头")
         variables = {
             "branch": branch,
             "remote": "origin",
@@ -845,8 +900,8 @@ class GitService:
             for key, replacement in variables.items():
                 value = value.replace("{" + key + "}", replacement)
             expanded.append(value)
-        # _run() already prepends the resolved git executable.
-        return expanded[1:]
+        # _run_custom() resolves and prepends git or gh itself.
+        return expanded
 
     def _remote_error(self, code: str, message: str, out: str, err: str, remote_url: str) -> ApiError:
         detail = _short((err or out).strip(), 1600)
