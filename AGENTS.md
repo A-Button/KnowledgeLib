@@ -11,7 +11,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 测试：pytest + 本地 Python Mock 上游，禁止使用真实 API Key 或访问外部模型服务。
 - 配置：保存在用户目录（Windows `%APPDATA%\KnowledgeLib\settings.json`），不要提交到仓库。
 - 运行时数据：`data/`（知识库、回收站、缓存）不进入版本控制。
-- Git 同步：每个知识库可初始化独立仓库；remote 存在 `.git/config`，同步偏好存在用户配置目录的 `git-sync.json`。
+- Git 同步：整个知识库根目录共用一个仓库；remote 存在根目录 `.git/config`，同步偏好存在用户配置目录 `settings.json` 的 `git` 段。
 
 ## 硬性收尾流程
 
@@ -87,9 +87,9 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 知识库/学习路径重命名只改 `.kb.json` / `.path.json` 的 `name`，不改目录名、slug 与文件内容。
 - 前端静态资源改动后，提醒用户重启后端（若改 Python）并 Ctrl+F5；后端改动只刷新页面不会生效。
 - 主题/液态玻璃/无衬线开关只存浏览器 `localStorage`；liquidGL 本地 vendored 且为 MIT，CSP 需要 `worker-src 'self' blob:`。
-- Git 同步设置（自动同步、间隔、方向、冲突策略、自定义命令）只存用户配置目录的 `git-sync.json`；remote 存在知识库的 `.git/config`，不得写进 `.kb.json` 或提交进仓库。
+- Git 同步设置（自动同步、间隔、方向、冲突策略、自定义命令）只存用户配置目录 `settings.json` 的 `git` 段；remote 存在知识库根目录的 `.git/config`，不得写进单个 `.kb.json` 或提交进仓库。
 - 自定义 Git 命令必须以 `git` 或 `gh` 开头、不经 shell 执行，并拒绝 `-C` / `--git-dir` / `--work-tree` 等切仓参数；`gh` 通过 `KL_GH_PATH` / PATH / 常见安装目录解析，错误信息中的 remote URL 要脱敏。
-- 后台自动同步线程只在服务 lifespan 内启动；测试用临时裸仓库，不得访问 GitHub 等外部远端。
+- 后台自动同步线程只在服务 lifespan 内启动；测试用临时裸仓库，不得访问 GitHub 等外部远端。旧版每库 `.git` 必须先迁移（备份到 `data/trash/git-repos`）或手工移除，否则拒绝初始化根仓库。
 
 ## 本机环境备注
 

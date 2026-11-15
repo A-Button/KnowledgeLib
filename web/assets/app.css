@@ -1172,6 +1172,7 @@ button { cursor: pointer; }
 .reader-check.is-disabled input { cursor: not-allowed; }
 
 /* ------------------------------------------------------------- git panel */
+.settings-grid + .git-card { margin-top: 22px; }
 .git-card { border-top: 3px solid var(--accent); }
 .git-card .card-head { align-items: flex-start; }
 .git-status-grid {

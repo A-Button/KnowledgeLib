@@ -16,15 +16,14 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .errors import ApiError
-from .storage import read_json, touch_private, utc_now_iso, write_json_atomic
+from .storage import utc_now_iso
 
 STRATEGIES = ("abort", "local", "remote", "manual")
 DIRECTIONS = ("sync", "pull", "push")
-KB_META = ".kb.json"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "autoSync": False,
@@ -172,133 +171,88 @@ def validate_command(value: Any, field: str) -> str:
     return text
 
 
+def normalize_git_settings(current: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(patch, Mapping):
+        raise ApiError(400, "invalid_request", "Git 设置必须是对象")
+    result = dict(DEFAULT_SETTINGS)
+    if isinstance(current, Mapping):
+        for key in result:
+            if key in current:
+                result[key] = current[key]
+    if "autoSync" in patch:
+        if not isinstance(patch["autoSync"], bool):
+            raise ApiError(400, "invalid_request", "autoSync 必须是布尔值")
+        result["autoSync"] = patch["autoSync"]
+    if "autoCommit" in patch:
+        if not isinstance(patch["autoCommit"], bool):
+            raise ApiError(400, "invalid_request", "autoCommit 必须是布尔值")
+        result["autoCommit"] = patch["autoCommit"]
+    if "intervalMinutes" in patch:
+        try:
+            interval = int(patch["intervalMinutes"])
+        except (TypeError, ValueError):
+            raise ApiError(400, "invalid_request", "同步间隔必须是整数分钟")
+        if interval < 1 or interval > 1440:
+            raise ApiError(400, "invalid_request", "同步间隔需要在 1..1440 分钟之间")
+        result["intervalMinutes"] = interval
+    if "autoDirection" in patch:
+        direction = str(patch["autoDirection"] or "")
+        if direction not in DIRECTIONS:
+            raise ApiError(400, "invalid_request", "自动同步方向不合法")
+        result["autoDirection"] = direction
+    if "strategy" in patch:
+        strategy = str(patch["strategy"] or "")
+        if strategy not in STRATEGIES:
+            raise ApiError(400, "invalid_request", "冲突处理策略不合法")
+        result["strategy"] = strategy
+    if "pushCommand" in patch:
+        result["pushCommand"] = validate_command(patch["pushCommand"], "自定义推送命令")
+    if "pullCommand" in patch:
+        result["pullCommand"] = validate_command(patch["pullCommand"], "自定义拉取命令")
+    result["updatedAt"] = utc_now_iso()
+    return result
+
+
 class GitService:
-    """Run local git commands for knowledge bases and track sync preferences."""
+    """Run git for the whole knowledge-base root and track global preferences."""
 
     def __init__(
         self,
-        config_dir: Path,
+        config: Any,
         environ: Mapping[str, str] | None = None,
         poll_seconds: float = 30.0,
     ) -> None:
-        self.config_dir = Path(config_dir).expanduser().resolve()
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_path = self.config_dir / "git-sync.json"
+        self.config = config
         self.environ = dict(os.environ)
         if environ:
             self.environ.update({str(key): str(value) for key, value in environ.items()})
         self.poll_seconds = max(5.0, float(poll_seconds))
-        self._config_lock = threading.RLock()
-        self._repo_guard = threading.Lock()
-        self._repo_locks: dict[str, threading.Lock] = {}
+        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._root_provider: Callable[[], Path] | None = None
-        self._data = self._load()
 
-    # ---------------------------------------------------------------- config
-    def _load(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"version": 1, "kbs": {}}
-        if not self.config_path.exists():
-            self._save(data)
-            return data
-        try:
-            loaded = read_json(self.config_path)
-        except Exception:
-            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            backup = self.config_path.with_name(f"git-sync.json.corrupt-{stamp}")
-            try:
-                shutil.move(str(self.config_path), str(backup))
-            except OSError:
-                pass
-            self._save(data)
-            return data
-        if not isinstance(loaded, dict) or not isinstance(loaded.get("kbs"), dict):
-            self._save(data)
-            return data
-        data["kbs"] = {
-            str(key): value
-            for key, value in loaded["kbs"].items()
-            if isinstance(key, str) and isinstance(value, dict)
+    def root(self) -> Path:
+        return Path(self.config.kb_root())
+
+    def settings(self) -> dict[str, Any]:
+        return dict(self.config.git_settings())
+
+    def update_settings(self, patch: Mapping[str, Any]) -> dict[str, Any]:
+        self.config.update({"git": patch})
+        return self.settings()
+
+    def _record_attempt(self, at: str, direction: str) -> None:
+        self.config.patch_git_state({"lastAttemptAt": at, "lastDirection": direction})
+
+    def _record_result(self, status: str, message: str, direction: str) -> None:
+        fields: dict[str, Any] = {
+            "lastDirection": direction,
+            "lastStatus": status,
+            "lastMessage": _tail(message, 600),
         }
-        return data
-
-    def _save(self, data: dict[str, Any] | None = None) -> None:
-        write_json_atomic(self.config_path, self._data if data is None else data)
-        try:
-            os.chmod(self.config_path, 0o600)
-        except OSError:
-            pass
-        touch_private(self.config_path)
-
-    def settings_for(self, kb_id: str) -> dict[str, Any]:
-        with self._config_lock:
-            stored = self._data["kbs"].get(str(kb_id), {})
-            result = dict(DEFAULT_SETTINGS)
-            if isinstance(stored, dict):
-                for key in result:
-                    if key in stored:
-                        result[key] = stored[key]
-            return result
-
-    def update_settings(self, kb_id: str, patch: Mapping[str, Any]) -> dict[str, Any]:
-        if not isinstance(patch, Mapping):
-            raise ApiError(400, "invalid_request", "请求体必须是 JSON 对象")
-        next_settings = self.settings_for(kb_id)
-        if "autoSync" in patch:
-            if not isinstance(patch["autoSync"], bool):
-                raise ApiError(400, "invalid_request", "autoSync 必须是布尔值")
-            next_settings["autoSync"] = patch["autoSync"]
-        if "autoCommit" in patch:
-            if not isinstance(patch["autoCommit"], bool):
-                raise ApiError(400, "invalid_request", "autoCommit 必须是布尔值")
-            next_settings["autoCommit"] = patch["autoCommit"]
-        if "intervalMinutes" in patch:
-            try:
-                interval = int(patch["intervalMinutes"])
-            except (TypeError, ValueError):
-                raise ApiError(400, "invalid_request", "同步间隔必须是整数分钟")
-            if interval < 1 or interval > 1440:
-                raise ApiError(400, "invalid_request", "同步间隔需要在 1..1440 分钟之间")
-            next_settings["intervalMinutes"] = interval
-        if "autoDirection" in patch:
-            direction = str(patch["autoDirection"] or "")
-            if direction not in DIRECTIONS:
-                raise ApiError(400, "invalid_request", "自动同步方向不合法")
-            next_settings["autoDirection"] = direction
-        if "strategy" in patch:
-            strategy = str(patch["strategy"] or "")
-            if strategy not in STRATEGIES:
-                raise ApiError(400, "invalid_request", "冲突处理策略不合法")
-            next_settings["strategy"] = strategy
-        if "pushCommand" in patch:
-            next_settings["pushCommand"] = validate_command(patch["pushCommand"], "自定义推送命令")
-        if "pullCommand" in patch:
-            next_settings["pullCommand"] = validate_command(patch["pullCommand"], "自定义拉取命令")
-        next_settings["updatedAt"] = utc_now_iso()
-        with self._config_lock:
-            self._data["kbs"][str(kb_id)] = dict(next_settings)
-            self._save()
-        return dict(next_settings)
-
-    def _record_attempt(self, kb_id: str, at: str, direction: str) -> None:
-        with self._config_lock:
-            settings = self.settings_for(kb_id)
-            settings["lastAttemptAt"] = at
-            settings["lastDirection"] = direction
-            self._data["kbs"][str(kb_id)] = settings
-            self._save()
-
-    def _record_result(self, kb_id: str, status: str, message: str, direction: str) -> None:
-        with self._config_lock:
-            settings = self.settings_for(kb_id)
-            settings["lastDirection"] = direction
-            settings["lastStatus"] = status
-            settings["lastMessage"] = _tail(message, 600)
-            if status == "ok":
-                settings["lastSyncAt"] = utc_now_iso()
-            self._data["kbs"][str(kb_id)] = settings
-            self._save()
+        if status == "ok":
+            fields["lastSyncAt"] = utc_now_iso()
+        self.config.patch_git_state(fields)
 
     # ------------------------------------------------------------------- git
     def _git(self) -> str:
@@ -477,11 +431,35 @@ class GitService:
         raise ApiError(500, "git_commit_failed", f"创建提交失败：{_tail(err or out)}")
 
     # ----------------------------------------------------------------- status
-    def status(self, kb_dir: Path, kb_id: str) -> dict[str, Any]:
-        settings = self.settings_for(kb_id)
+    def _kb_count(self, root: Path) -> int:
+        try:
+            return sum(
+                1
+                for child in root.iterdir()
+                if child.is_dir() and not child.name.startswith(".") and (child / ".kb.json").is_file()
+            )
+        except OSError:
+            return 0
+
+    def _legacy_repos(self, root: Path) -> list[str]:
+        try:
+            return sorted(
+                child.name
+                for child in root.iterdir()
+                if child.is_dir() and not child.name.startswith(".") and (child / ".git").exists()
+            )
+        except OSError:
+            return []
+
+    def status(self) -> dict[str, Any]:
+        root = self.root()
+        settings = self.settings()
         result: dict[str, Any] = {
             "available": bool(shutil.which("git")),
             "managed": False,
+            "root": str(root),
+            "kbCount": self._kb_count(root),
+            "legacyRepos": self._legacy_repos(root),
             "branch": "",
             "remoteUrl": "",
             "upstream": "",
@@ -503,17 +481,20 @@ class GitService:
         if not result["available"]:
             result["error"] = "未找到 git，请先安装 Git 并确保它在 PATH 中"
             return result
-        if not self._managed(kb_dir):
+        if result["legacyRepos"]:
+            result["error"] = "检测到知识库目录内仍有独立 Git 仓库；请迁移为文库集仓库后再同步"
+            return result
+        if not self._managed(root):
             return result
         result["managed"] = True
         try:
-            branch = self._branch(kb_dir)
+            branch = self._branch(root)
             result["branch"] = branch
-            result["remoteUrl"] = self._remote_url(kb_dir)
-            result["upstream"] = self._upstream(kb_dir)
+            result["remoteUrl"] = self._remote_url(root)
+            result["upstream"] = self._upstream(root)
             code, out, _ = self._run(
                 ["status", "--porcelain=v1", "--untracked-files=all"],
-                kb_dir,
+                root,
                 timeout=20,
             )
             if code == 0:
@@ -521,12 +502,12 @@ class GitService:
                 result["changedFiles"] = len(lines)
                 result["dirty"] = bool(lines)
                 result["changed"] = [line[3:] if len(line) > 3 else line for line in lines[:20]]
-            result["conflicts"] = self._conflicts(kb_dir)
-            result["mergeInProgress"] = self._merge_in_progress(kb_dir)
+            result["conflicts"] = self._conflicts(root)
+            result["mergeInProgress"] = self._merge_in_progress(root)
             if result["upstream"]:
                 code, out, _ = self._run(
                     ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-                    kb_dir,
+                    root,
                     timeout=20,
                 )
                 if code == 0:
@@ -536,7 +517,7 @@ class GitService:
                         result["behind"] = int(parts[1])
             code, out, _ = self._run(
                 ["log", "-1", "--format=%H%x00%h%x00%s%x00%cI"],
-                kb_dir,
+                root,
                 timeout=15,
             )
             if code == 0 and out.strip():
@@ -565,103 +546,125 @@ class GitService:
         return _iso(base + timedelta(minutes=minutes))
 
     # ------------------------------------------------------------------- init
+    def _archive_legacy_repos(self, root: Path, names: list[str]) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        trash = Path(self.config.data_dir) / "trash" / "git-repos" / stamp
+        for name in names:
+            source = root / name / ".git"
+            target = trash / name / ".git"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(source), str(target))
+            except OSError as exc:
+                raise ApiError(500, "git_migrate_failed", f"备份旧仓库 {name}/.git 失败：{exc}")
+        return trash
+
     def init_repo(
         self,
-        kb_dir: Path,
-        kb_id: str,
         remote_url: str = "",
         branch: str = "main",
+        migrate_legacy: bool = False,
     ) -> dict[str, Any]:
-        kb_dir = Path(kb_dir)
+        root = self.root()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ApiError(400, "invalid_path", f"知识库根目录不可用：{exc}")
         branch = validate_branch(branch)
         remote = validate_remote_url(remote_url) if (remote_url or "").strip() else ""
-        if (kb_dir / ".git").exists():
-            if not self._managed(kb_dir):
+        legacy = self._legacy_repos(root)
+        if legacy:
+            if not migrate_legacy:
+                raise ApiError(
+                    409,
+                    "git_legacy_repos",
+                    "检测到知识库目录内仍有独立 Git 仓库；请先备份，或勾选迁移后重试",
+                    {"repos": legacy},
+                )
+            self._archive_legacy_repos(root, legacy)
+        if (root / ".git").exists():
+            if not self._managed(root):
                 raise ApiError(409, "git_conflict", "目录中存在无法识别的 .git，请先手动处理")
             if remote:
-                return self.set_remote(kb_dir, kb_id, remote)
-            return self.status(kb_dir, kb_id)
-        code, out, err = self._run(["init", "-b", branch], kb_dir, timeout=60)
+                return self.set_remote(remote)
+            return self.status()
+        code, out, err = self._run(["init", "-b", branch], root, timeout=60)
         if code != 0:
-            code, out, err = self._run(["init"], kb_dir, timeout=60)
+            code, out, err = self._run(["init"], root, timeout=60)
             if code != 0:
                 raise ApiError(500, "git_init_failed", f"初始化 Git 仓库失败：{_tail(err or out)}")
-            self._run(["checkout", "-b", branch], kb_dir, timeout=30)
-        self._run(["config", "core.quotepath", "false"], kb_dir, timeout=15)
-        self._ensure_identity(kb_dir)
-        ignore = kb_dir / ".gitignore"
+            self._run(["checkout", "-b", branch], root, timeout=30)
+        self._run(["config", "core.quotepath", "false"], root, timeout=15)
+        self._ensure_identity(root)
+        ignore = root / ".gitignore"
         if not ignore.exists():
             ignore.write_text(".DS_Store\nThumbs.db\n*.tmp\n", encoding="utf-8")
         if remote:
-            code, out, err = self._run(["remote", "add", "origin", remote], kb_dir, timeout=20)
+            code, out, err = self._run(["remote", "add", "origin", remote], root, timeout=20)
             if code != 0:
                 raise ApiError(502, "git_remote_failed", f"添加 remote 失败：{_tail(err or out)}")
-        self._commit_all(kb_dir, "Initialize KnowledgeLib knowledge base")
-        return self.status(kb_dir, kb_id)
+        self._commit_all(root, "Initialize KnowledgeLib library")
+        return self.status()
 
-    def set_remote(self, kb_dir: Path, kb_id: str, url: str) -> dict[str, Any]:
-        self._ensure_repo(kb_dir)
+    def set_remote(self, url: str) -> dict[str, Any]:
+        root = self.root()
+        self._ensure_repo(root)
         remote = validate_remote_url(url)
-        code, _, _ = self._run(["remote", "get-url", "origin"], kb_dir, timeout=15)
+        code, _, _ = self._run(["remote", "get-url", "origin"], root, timeout=15)
         if code == 0:
-            code, out, err = self._run(["remote", "set-url", "origin", remote], kb_dir, timeout=20)
+            code, out, err = self._run(["remote", "set-url", "origin", remote], root, timeout=20)
         else:
-            code, out, err = self._run(["remote", "add", "origin", remote], kb_dir, timeout=20)
+            code, out, err = self._run(["remote", "add", "origin", remote], root, timeout=20)
         if code != 0:
             raise ApiError(502, "git_remote_failed", f"保存 remote 失败：{_tail(err or out)}")
-        return self.status(kb_dir, kb_id)
+        return self.status()
 
     # ------------------------------------------------------------------- sync
-    def _repo_lock(self, kb_id: str) -> threading.Lock:
-        with self._repo_guard:
-            lock = self._repo_locks.get(str(kb_id))
-            if lock is None:
-                lock = threading.Lock()
-                self._repo_locks[str(kb_id)] = lock
-            return lock
-
     def sync(
         self,
-        kb_dir: Path,
-        kb_id: str,
         direction: str = "sync",
         strategy: str | None = None,
         trigger: str = "manual",
     ) -> dict[str, Any]:
         if direction not in DIRECTIONS:
             raise ApiError(400, "invalid_request", "同步方向不合法")
-        settings = self.settings_for(kb_id)
+        settings = self.settings()
         chosen = strategy or settings["strategy"]
         if chosen not in STRATEGIES:
             raise ApiError(400, "invalid_request", "冲突处理策略不合法")
-        lock = self._repo_lock(kb_id)
-        if not lock.acquire(blocking=False):
-            raise ApiError(409, "git_busy", "该知识库正在同步，请稍后再试")
+        if not self._lock.acquire(blocking=False):
+            raise ApiError(409, "git_busy", "文库集正在同步，请稍后再试")
         try:
-            self._record_attempt(kb_id, utc_now_iso(), direction)
-            result = self._sync_locked(Path(kb_dir), kb_id, direction, chosen, trigger, settings)
-            self._record_result(kb_id, "ok", result.get("message", "同步完成"), direction)
+            self._record_attempt(utc_now_iso(), direction)
+            result = self._sync_locked(self.root(), direction, chosen, trigger, settings)
+            self._record_result("ok", result.get("message", "同步完成"), direction)
             return result
         except ApiError as exc:
-            self._record_result(kb_id, "error", exc.message, direction)
+            self._record_result("error", exc.message, direction)
             raise
         except Exception as exc:  # noqa: BLE001
             message = f"同步失败：{exc}"
-            self._record_result(kb_id, "error", message, direction)
+            self._record_result("error", message, direction)
             raise ApiError(500, "git_sync_failed", message)
         finally:
-            lock.release()
+            self._lock.release()
 
     def _sync_locked(
         self,
         kb_dir: Path,
-        kb_id: str,
         direction: str,
         strategy: str,
         trigger: str,
         settings: Mapping[str, Any],
     ) -> dict[str, Any]:
         self._ensure_repo(kb_dir)
+        if self._legacy_repos(kb_dir):
+            raise ApiError(
+                409,
+                "git_legacy_repos",
+                "检测到知识库目录内仍有独立 Git 仓库；请先迁移为文库集仓库",
+                {"repos": self._legacy_repos(kb_dir)},
+            )
         remote = self._remote_url(kb_dir)
         if not remote:
             raise ApiError(409, "git_no_remote", "尚未添加 Git remote，请先填写远端地址")
@@ -910,10 +913,9 @@ class GitService:
         return ApiError(502, code, message + (f"：{_tail(detail, 300)}" if detail else ""))
 
     # -------------------------------------------------------------- scheduler
-    def start_scheduler(self, root_provider: Callable[[], Path]) -> None:
+    def start_scheduler(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._root_provider = root_provider
         self._stop.clear()
         self._thread = threading.Thread(target=self._scheduler_loop, name="kl-git-sync", daemon=True)
         self._thread.start()
@@ -927,52 +929,30 @@ class GitService:
 
     def _scheduler_loop(self) -> None:
         while not self._stop.wait(self.poll_seconds):
-            provider = self._root_provider
-            if not provider:
-                continue
             try:
-                self.scheduler_tick(provider())
+                self.scheduler_tick()
             except Exception:  # noqa: BLE001
                 continue
 
-    def scheduler_tick(self, root: Path, now: datetime | None = None) -> list[dict[str, Any]]:
+    def scheduler_tick(self, now: datetime | None = None) -> list[dict[str, Any]]:
         current = now or _now_dt()
-        results: list[dict[str, Any]] = []
+        root = self.root()
+        settings = self.settings()
+        if not settings.get("autoSync") or not (root / ".git").exists():
+            return []
+        base = _parse_time(settings.get("lastAttemptAt")) or _parse_time(settings.get("updatedAt"))
+        if base is not None:
+            due = base + timedelta(minutes=int(settings.get("intervalMinutes") or 15))
+            if current < due:
+                return []
         try:
-            children = sorted(Path(root).iterdir(), key=lambda item: item.name.lower())
-        except OSError:
-            return results
-        for kb_dir in children:
-            if not kb_dir.is_dir() or kb_dir.name.startswith("."):
-                continue
-            try:
-                meta = read_json(kb_dir / KB_META)
-            except Exception:
-                continue
-            if not isinstance(meta, dict):
-                continue
-            kb_id = str(meta.get("id") or "")
-            if not kb_id:
-                continue
-            settings = self.settings_for(kb_id)
-            if not settings.get("autoSync") or not (kb_dir / ".git").exists():
-                continue
-            base = _parse_time(settings.get("lastAttemptAt")) or _parse_time(settings.get("updatedAt"))
-            if base is not None:
-                due = base + timedelta(minutes=int(settings.get("intervalMinutes") or 15))
-                if current < due:
-                    continue
-            try:
-                self.sync(
-                    kb_dir,
-                    kb_id,
-                    direction=str(settings.get("autoDirection") or "sync"),
-                    strategy=str(settings.get("strategy") or "abort"),
-                    trigger="auto",
-                )
-                results.append({"kbId": kb_id, "ok": True})
-            except ApiError as exc:
-                results.append({"kbId": kb_id, "ok": False, "message": exc.message})
-            except Exception as exc:  # noqa: BLE001
-                results.append({"kbId": kb_id, "ok": False, "message": str(exc)})
-        return results
+            self.sync(
+                direction=str(settings.get("autoDirection") or "sync"),
+                strategy=str(settings.get("strategy") or "abort"),
+                trigger="auto",
+            )
+            return [{"root": str(root), "ok": True}]
+        except ApiError as exc:
+            return [{"root": str(root), "ok": False, "message": exc.message}]
+        except Exception as exc:  # noqa: BLE001
+            return [{"root": str(root), "ok": False, "message": str(exc)}]

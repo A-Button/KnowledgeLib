@@ -43,7 +43,7 @@ class AppState:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir = Path(config_dir).expanduser().resolve() if config_dir else default_config_dir(environ)
         self.config = ConfigStore(self.config_dir, self.data_dir, environ)
-        self.git = GitService(self.config_dir, environ)
+        self.git = GitService(self.config, environ)
         self.index_cache = IndexCache()
         self._locks: dict[str, asyncio.Lock] = {}
         self._guard = threading.Lock()
@@ -79,7 +79,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        state.git.start_scheduler(state.config.kb_root)
+        state.git.start_scheduler()
         try:
             yield
         finally:

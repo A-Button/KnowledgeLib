@@ -21,7 +21,7 @@
 - **阅读助手**：仅知识库 / 联网增强 / 纯对话三种模式，当前文件与当前路径文件列表自动作为上下文；`read` / `edit` / `write` / `highlight` 四个文档工具可在顶部开关。
 - **检索与联网**：中文友好的分词 + BM25；DeepSeek 模型可用服务端联网与四档思考强度，其他 OpenAI 兼容服务走应用侧 Search / Fetch 代理。
 - **管理与外观**：知识库 / 学习路径可重命名（只写元数据），删除进 `data/trash/`；档案室与现代两套主题，现代主题可开液态玻璃或禁用衬线字体。
-- **Git 同步**：每个知识库可独立初始化仓库、绑定 origin、手动或按间隔自动同步；冲突可选中止 / 本地优先 / 远端优先 / 手工处理，自定义命令可用 `git` 或 `gh`，并支持占位符。
+- **Git 同步**：整个知识库根目录共用一个仓库，一次同步所有知识库；支持绑定 origin、手动或按间隔自动同步、四种冲突策略，以及 `git` / `gh` 自定义命令。
 
 ## 界面截图
 
@@ -130,25 +130,27 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：**函数工�
 
 主题、液态玻璃与字体开关只保存在浏览器 `localStorage`（键为 `kl.theme` / `kl.glass` / `kl.noSerif`），不写入用户配置，也不跨设备同步。
 
-## Git 同步
+## 文库集 Git 同步
 
-每个知识库可以单独启用 Git：知识库页 →「Git 同步」。
+设置 →「文库集 Git 同步」。整个知识库根目录共用一个 Git 仓库，覆盖根目录下的全部知识库；不再为每个知识库单独建仓库。
 
 | 项 | 说明 |
 | --- | --- |
-| 初始化 | 在知识库目录建立独立仓库（默认分支 `main`），写入基础 `.gitignore`，把现有资料提交为首个版本；可同时填写远端。 |
-| Remote | 支持 HTTPS、SSH、`file://` 与本地路径，固定为 `origin`；远端地址存在知识库的 `.git/config`，不写进 `.kb.json`，凭据沿用系统 Git 配置。 |
-| 手动操作 | 拉取、推送、立即同步（先拉后推）与刷新状态；拉取使用 `fetch` + `merge`，不改写本地提交。 |
-| 自动同步 | 间隔 1..1440 分钟，方向为「先拉后推 / 仅拉取 / 仅推送」；服务每 30 秒检查一次，到期才执行，默认关闭。 |
-| 自动提交 | 默认开启：同步前若有改动，先 `git add -A` 并创建同步提交；关闭时遇到未提交改动会拒绝同步，避免把半成品推上去。 |
+| 初始化 | 在知识库根目录建立仓库（默认分支 main），写入基础 .gitignore，把全部知识库提交为首个版本；可同时填写远端。 |
+| Remote | 支持 HTTPS、SSH、file:// 与本地路径，固定为 origin；远端地址存在根目录的 .git/config，不写进任何知识库元数据，凭据沿用系统 Git 配置。 |
+| 范围 | 根目录下所有知识库、学习路径和 Markdown 资料一次性提交、拉取和推送。 |
+| 手动操作 | 拉取、推送、立即同步（先拉后推）与刷新状态；拉取使用 fetch + merge，不改写本地提交。 |
+| 自动同步 | 全局间隔 1..1440 分钟，方向为「先拉后推 / 仅拉取 / 仅推送」；服务每 30 秒检查一次，到期才执行，默认关闭。 |
+| 自动提交 | 默认开启：同步前若有改动，先 git add -A 并创建同步提交；关闭时遇到未提交改动会拒绝同步。 |
 | 冲突处理 | 「停止并保留现场」中止合并并保留本地文件；「优先本地 / 优先远端」自动取一侧；「保留冲突待手工」留下冲突标记，解决后再同步。 |
-| 自定义命令 | 可分别覆盖拉取与推送命令；命令必须以 `git` 或 `gh` 开头、不经 shell，支持 `{branch}`、`{remote}`、`{url}`、`{kb}` 占位符，留空时使用内置命令。`gh` 需已安装并登录。 |
+| 自定义命令 | 可分别覆盖拉取与推送命令；命令必须以 git 或 gh 开头、不经 shell，支持 {branch}、{remote}、{url}、{kb} 占位符，留空时使用内置命令。gh 需已安装并登录。 |
+| 旧仓库迁移 | 若检测到知识库目录内仍有旧版每库 .git，可勾选迁移，把旧仓库备份到 data/trash/git-repos 后再建立根仓库。 |
 
-同步偏好保存在用户配置目录的 `git-sync.json`（不含 Git 凭据）。服务端设置 `GIT_TERMINAL_PROMPT=0`，需要交互输入密码时直接失败，避免后台任务挂起。
+同步设置写入用户配置 settings.json 的 git 段（不再使用 git-sync.json）；remote 存在知识库根目录的 .git/config。服务端设置 GIT_TERMINAL_PROMPT=0，需要交互输入密码时直接失败，避免后台任务挂起。
 
 ## 配置与数据
 
-配置文件在用户目录，不写进项目目录：Windows 为 `%APPDATA%\KnowledgeLib\settings.json`，macOS / Linux 为 `~/.config/knowledgelib/settings.json`（遵循 `XDG_CONFIG_HOME`）；可用 `--config-dir` 或 `KL_CONFIG_DIR` 覆盖，旧版 `data/settings.json` 在首次启动时自动复制迁移。同目录的 `git-sync.json` 保存各知识库的自动同步设置。Key 在接口中只返回掩码，文件写入后尽力 `chmod 600`；坏 JSON 会自动备份为 `settings.json.corrupt-<时间戳>` 并重建默认配置。
+配置文件在用户目录，不写进项目目录：Windows 为 `%APPDATA%\KnowledgeLib\settings.json`，macOS / Linux 为 `~/.config/knowledgelib/settings.json`（遵循 `XDG_CONFIG_HOME`）；可用 `--config-dir` 或 `KL_CONFIG_DIR` 覆盖，旧版 `data/settings.json` 在首次启动时自动复制迁移。Git 同步设置保存在同一个 `settings.json` 的 `git` 段（不再使用 `git-sync.json`）。Key 在接口中只返回掩码，文件写入后尽力 `chmod 600`；坏 JSON 会自动备份为 `settings.json.corrupt-<时间戳>` 并重建默认配置。
 
 主要默认值：
 
@@ -166,8 +168,12 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：**函数工�
 ```text
 data/
   library/                 默认知识库根目录（可在设置中改）
+    .git/                  文库集 Git 仓库（启用同步后）
+    .gitignore
+    <知识库>/
   trash/                   软删除的目录
     edits/                 edit 写回前的旧版本
+    git-repos/             迁移旧版每库 .git 时的备份
 ```
 
 - 删除知识库 / 学习路径会移动到 `data/trash/<时间戳>-<目录名>/`，不直接抹掉；路径生成中禁止删除（返回 409）。
@@ -205,7 +211,7 @@ uv run python tools/selfcheck.py    # AST + node --check + 全量 pytest → ALL
 - 检索与对话：中文 BM25、分块、缓存失效、对话引用、知识库 + 联网、Search / Fetch 代理与错误映射。
 - DeepSeek：联网 / 思考四种组合下的工具抑制、服务端 web_tools、思考参数、`reasoning_content` 回传、工具调用轮次。
 - 文档工具：`read` / `edit` / `write` / `highlight`、编号规范、编辑备份、路径穿越拒绝、highlight 匹配器（跨行、跨行内代码 / 粗体 / 链接、Markdown 标记剥离）。
-- Git 同步：初始化、remote、自动提交与推送、拉取、本地 / 远端优先冲突、手工冲突恢复、自定义命令与占位符、定时器、Git API。
+- 文库集 Git 同步：根目录单仓库、remote、全库自动提交与推送、拉取、本地 / 远端优先冲突、手工冲突恢复、旧每库仓库迁移、自定义命令与占位符、定时器、全局 Git API。
 - 前端与脚本：静态资源、JS 语法、`byId` 引用、启动脚本守卫、主题资源顺序、现代主题 / 无衬线 CSS、liquidGL 许可与 CSP worker 放行。
 
 Mock 也可单独启动，用于无 Key 的界面演示：
@@ -234,11 +240,11 @@ uv run python -m tests.mock_upstream --port 8766
 | GET | `/api/kbs/{id}/file?path={pathId}&name={文件名}` | 读取 `.md` |
 | GET | `/api/kbs/{id}/search?q=&topK=` | 检索预览（`topK` 1..20） |
 | POST | `/api/kbs/{id}/reindex` | 重建索引 |
-| GET | `/api/kbs/{id}/git` | Git 状态与同步设置 |
-| POST | `/api/kbs/{id}/git/init` | 初始化仓库（可选 remote） |
-| PUT | `/api/kbs/{id}/git/remote` | 保存 origin remote |
-| PUT | `/api/kbs/{id}/git/settings` | 保存自动同步与冲突策略 |
-| POST | `/api/kbs/{id}/git/sync` | 手动拉取 / 推送 / 同步 |
+| GET | `/api/git` | 文库集 Git 状态与全局设置 |
+| POST | `/api/git/init` | 初始化根仓库（可选 remote / 迁移旧仓库） |
+| PUT | `/api/git/remote` | 保存 origin remote |
+| PUT | `/api/git/settings` | 保存全局自动同步与冲突策略 |
+| POST | `/api/git/sync` | 手动拉取 / 推送 / 同步整个文库集 |
 | POST | `/api/web/search` / `/api/web/fetch` | DeepSeek Search / Fetch 代理 |
 | POST | `/api/chat` | 对话（SSE；`stream=false` 返回 JSON） |
 
@@ -260,7 +266,7 @@ server/
   library.py            知识库 / 路径、路径安全、软删除
   learning.py           规划、讲义、总览、编号写入、并发生成与续生成
   indexer.py            分块、中文分词、BM25 与索引缓存
-  git_sync.py           每库 Git 仓库、同步、冲突处理与定时器
+  git_sync.py           文库集 Git 仓库、同步、冲突处理与定时器
   llm.py                OpenAI 兼容客户端、思考与工具调用
   doc_tools.py          read / edit / write / highlight 工具
   webtools.py           DeepSeek Search / Fetch 客户端
@@ -293,8 +299,8 @@ Markdown 渲染先整体转义，再解析结构；禁用原始 HTML、`javascri
 
 - 只支持 Markdown 资料；生成依赖模型严格遵循 JSON 规划提示，解析失败会自动修复一次，仍失败可重试。
 - 检索是词法 BM25，不含向量模型；对中英文关键词有效，对纯语义改写的召回较弱。
-- 不包含 PDF / OCR / 图片入库、多用户与权限、托管式云同步（Git 同步需自备远端）、HTTPS 终结；Markdown 编辑只通过阅读助手的工具完成，没有独立富文本编辑器。
-- Git 同步要求系统已安装 `git`；HTTPS 凭据沿用系统 Git 配置，本应用不保存 Git 密码或 Token。
+- 不包含 PDF / OCR / 图片入库、多用户与权限、托管式云同步（文库集 Git 同步需自备远端）、HTTPS 终结；Markdown 编辑只通过阅读助手的工具完成，没有独立富文本编辑器。
+- 文库集 Git 同步要求系统已安装 `git`；HTTPS 凭据沿用系统 Git 配置，本应用不保存 Git 密码或 Token。旧版每库仓库需迁移或手工移除，否则全局同步会拒绝初始化。
 - API Key 保存在用户配置目录（尽力 `chmod 600`）；请勿把该文件或含 Key 的截图分享给他人。
 - 服务端 web_tools 与 DeepSeek 的联网 / 思考组合绑定；其他 OpenAI 兼容服务不能使用「联网生成」，思考参数可能被服务忽略。
 - DeepSeek 思考模式与「仅函数工具」互斥：未联网且开启思考时，编辑工具会被收起；这是服务端限制，不是前端开关失效。

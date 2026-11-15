@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .errors import ApiError
+from .git_sync import DEFAULT_SETTINGS as DEFAULT_GIT_SETTINGS, normalize_git_settings
 from .storage import read_json, touch_private, write_json_atomic
 
 DEFAULT_API_BASE = "https://api.deepseek.com"
@@ -138,6 +139,7 @@ class ConfigStore:
                 "topK": 6,
                 "contextChars": 6000,
             },
+            "git": copy.deepcopy(DEFAULT_GIT_SETTINGS),
         }
 
     def _load(self) -> dict[str, Any]:
@@ -164,10 +166,10 @@ class ConfigStore:
             if isinstance(defaults, dict) and isinstance(loaded.get(section), dict):
                 for key, value in defaults.items():
                     loaded[section].setdefault(key, copy.deepcopy(value))
-        if not isinstance(loaded.get("api"), dict) or not isinstance(loaded.get("web"), dict) or not isinstance(loaded.get("kb"), dict):
+        if not all(isinstance(loaded.get(section), dict) for section in ("api", "web", "kb", "git")):
             self.warnings.append("settings.json 结构不完整，缺失部分已用默认值补齐。")
             merged = self._defaults()
-            for section in ("api", "web", "kb"):
+            for section in ("api", "web", "kb", "git"):
                 if isinstance(loaded.get(section), dict):
                     merged[section].update(loaded[section])
             loaded = merged
@@ -240,6 +242,20 @@ class ConfigStore:
     def context_chars(self) -> int:
         return int(self._data["kb"].get("contextChars") or 6000)
 
+    def git_settings(self) -> dict[str, Any]:
+        with self._lock:
+            return copy.deepcopy(self._data.get("git", DEFAULT_GIT_SETTINGS))
+
+    def patch_git_state(self, fields: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(fields, Mapping):
+            raise ApiError(400, "invalid_request", "Git 状态必须是对象")
+        with self._lock:
+            next_data = copy.deepcopy(self._data)
+            next_data.setdefault("git", copy.deepcopy(DEFAULT_GIT_SETTINGS)).update(fields)
+            self._data = next_data
+            self._save()
+            return copy.deepcopy(self._data["git"])
+
     # ---------------------------------------------------------------- public
     def public(self) -> dict[str, Any]:
         with self._lock:
@@ -297,6 +313,7 @@ class ConfigStore:
                     "topK": self._data["kb"].get("topK", 6),
                     "contextChars": self._data["kb"].get("contextChars", 6000),
                 },
+                "git": self.git_settings(),
                 "warnings": list(self.warnings),
                 "configPath": str(self.path),
             }
@@ -310,6 +327,7 @@ class ConfigStore:
             api = patch.get("api")
             web = patch.get("web")
             kb = patch.get("kb")
+            git = patch.get("git")
             if api is not None:
                 if not isinstance(api, Mapping):
                     raise ApiError(400, "invalid_request", "api 必须是对象")
@@ -374,6 +392,10 @@ class ConfigStore:
                     target["topK"] = _validate_int(kb["topK"], "kb.topK", 1, 20)
                 if "contextChars" in kb:
                     target["contextChars"] = _validate_int(kb["contextChars"], "kb.contextChars", 1000, 20000)
+            if git is not None:
+                if not isinstance(git, Mapping):
+                    raise ApiError(400, "invalid_request", "git 必须是对象")
+                next_data["git"] = normalize_git_settings(next_data.get("git", {}), git)
             self._data = next_data
             self._save()
             return self.public()

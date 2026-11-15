@@ -1,4 +1,4 @@
-"""Git management endpoints for individual knowledge bases."""
+"""Global Git management endpoints for the whole library root."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 
-from . import library
 from .deps import get_state
 
-router = APIRouter(prefix="/api/kbs", tags=["git"])
+router = APIRouter(prefix="/api/git", tags=["git"])
 
 
 class GitInitRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     remoteUrl: str = ""
     branch: str = "main"
+    migrateLegacy: bool = False
 
 
 class GitRemoteRequest(BaseModel):
@@ -42,69 +42,57 @@ class GitSyncRequest(BaseModel):
     strategy: Literal["abort", "local", "remote", "manual"] | None = None
 
 
-def _kb_dir(state: Any, kb_id: str):
-    return library.find_kb(state.config.kb_root(), kb_id)
-
-
-def _invalidate(state: Any, kb_dir) -> None:
+def _invalidate(state: Any) -> None:
     try:
-        state.index_cache.invalidate_dir(kb_dir)
+        state.index_cache.invalidate_dir(state.config.kb_root())
     except Exception:
         pass
 
 
-@router.get("/{kb_id}/git")
-async def get_git(kb_id: str, request: Request) -> dict[str, Any]:
+@router.get("")
+async def get_git(request: Request) -> dict[str, Any]:
     state = get_state(request)
-    kb_dir = _kb_dir(state, kb_id)
-    return await run_in_threadpool(state.git.status, kb_dir, kb_id)
+    return await run_in_threadpool(state.git.status)
 
 
-@router.post("/{kb_id}/git/init")
-async def init_git(kb_id: str, payload: GitInitRequest, request: Request) -> dict[str, Any]:
+@router.post("/init")
+async def init_git(payload: GitInitRequest, request: Request) -> dict[str, Any]:
     state = get_state(request)
-    kb_dir = _kb_dir(state, kb_id)
     result = await run_in_threadpool(
         state.git.init_repo,
-        kb_dir,
-        kb_id,
         payload.remoteUrl,
         payload.branch,
+        payload.migrateLegacy,
     )
-    _invalidate(state, kb_dir)
+    _invalidate(state)
     return {"git": result}
 
 
-@router.put("/{kb_id}/git/remote")
-async def set_git_remote(kb_id: str, payload: GitRemoteRequest, request: Request) -> dict[str, Any]:
+@router.put("/remote")
+async def set_git_remote(payload: GitRemoteRequest, request: Request) -> dict[str, Any]:
     state = get_state(request)
-    kb_dir = _kb_dir(state, kb_id)
-    result = await run_in_threadpool(state.git.set_remote, kb_dir, kb_id, payload.url)
+    result = await run_in_threadpool(state.git.set_remote, payload.url)
     return {"git": result}
 
 
-@router.put("/{kb_id}/git/settings")
-async def update_git_settings(kb_id: str, payload: GitSettingsRequest, request: Request) -> dict[str, Any]:
+@router.put("/settings")
+async def update_git_settings(payload: GitSettingsRequest, request: Request) -> dict[str, Any]:
     state = get_state(request)
-    kb_dir = _kb_dir(state, kb_id)
     patch = payload.model_dump(exclude_unset=True)
-    settings = await run_in_threadpool(state.git.update_settings, kb_id, patch)
-    status = await run_in_threadpool(state.git.status, kb_dir, kb_id)
+    settings = await run_in_threadpool(state.git.update_settings, patch)
+    status = await run_in_threadpool(state.git.status)
     return {"settings": settings, "git": status}
 
 
-@router.post("/{kb_id}/git/sync")
-async def sync_git(kb_id: str, payload: GitSyncRequest, request: Request) -> dict[str, Any]:
+@router.post("/sync")
+async def sync_git(payload: GitSyncRequest, request: Request) -> dict[str, Any]:
     state = get_state(request)
-    kb_dir = _kb_dir(state, kb_id)
     result = await run_in_threadpool(
         state.git.sync,
-        kb_dir,
-        kb_id,
         payload.direction,
         payload.strategy,
         "manual",
     )
-    _invalidate(state, kb_dir)
-    status = await run_in_threadpool(state.git.status, kb_dir, kb_id)
+    _invalidate(state)
+    status = await run_in_threadpool(state.git.status)
     return {"result": result, "git": status}

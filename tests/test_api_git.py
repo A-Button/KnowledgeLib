@@ -1,4 +1,4 @@
-"""API tests for knowledge-base Git management."""
+"""API tests for whole-library Git management."""
 
 from __future__ import annotations
 
@@ -29,29 +29,35 @@ def make_remote(path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_git_api_lifecycle(client, tmp_path: Path):
-    created = await client.post("/api/kbs", json={"name": "Git API 库"})
-    assert created.status_code == 200, created.text
-    kb = created.json()
+async def test_git_api_whole_library(client, tmp_path: Path):
+    first = await client.post("/api/kbs", json={"name": "API 第一库"})
+    second = await client.post("/api/kbs", json={"name": "API 第二库"})
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    first_kb = first.json()
+    second_kb = second.json()
+    (Path(first_kb["absPath"]) / "01-api.md").write_text("# 01 · API\n\n第一库 API\n", encoding="utf-8")
+    (Path(second_kb["absPath"]) / "01-api2.md").write_text("# 01 · API2\n\n第二库 API\n", encoding="utf-8")
     remote = make_remote(tmp_path / "remote.git")
 
-    initial = (await client.get(f"/api/kbs/{kb['id']}/git")).json()
+    initial = (await client.get("/api/git")).json()
     assert initial["available"] is True
     assert initial["managed"] is False
-    assert initial["settings"]["autoSync"] is False
+    assert initial["kbCount"] == 2
+    assert initial["root"] == (await client.get("/api/kbs")).json()["root"]
 
     initialized = await client.post(
-        f"/api/kbs/{kb['id']}/git/init",
+        "/api/git/init",
         json={"remoteUrl": str(remote), "branch": "main"},
     )
     assert initialized.status_code == 200, initialized.text
     status = initialized.json()["git"]
     assert status["managed"] is True
-    assert status["branch"] == "main"
+    assert status["kbCount"] == 2
     assert status["remoteUrl"] == str(remote)
 
     settings = await client.put(
-        f"/api/kbs/{kb['id']}/git/settings",
+        "/api/git/settings",
         json={
             "autoSync": True,
             "intervalMinutes": 7,
@@ -64,64 +70,62 @@ async def test_git_api_lifecycle(client, tmp_path: Path):
     )
     assert settings.status_code == 200, settings.text
     assert settings.json()["settings"]["intervalMinutes"] == 7
-    assert settings.json()["git"]["settings"]["strategy"] == "local"
+    assert settings.json()["settings"]["strategy"] == "local"
 
-    kb_dir = Path(kb["absPath"])
-    (kb_dir / "01-api.md").write_text("# 01 · API\n\nAPI 内容\n", encoding="utf-8")
-    pushed = await client.post(f"/api/kbs/{kb['id']}/git/sync", json={"direction": "sync"})
+    pushed = await client.post("/api/git/sync", json={"direction": "sync"})
     assert pushed.status_code == 200, pushed.text
-    result = pushed.json()["result"]
-    assert result["ok"] is True
-    assert "已用自定义命令推送" in result["message"] or "已推送" in result["message"]
+    assert pushed.json()["result"]["ok"] is True
     assert pushed.json()["git"]["dirty"] is False
 
     clone = tmp_path / "clone"
     git("clone", str(remote), str(clone))
-    assert (clone / "01-api.md").is_file()
+    assert (clone / first_kb["dirName"] / "01-api.md").is_file()
+    assert (clone / second_kb["dirName"] / "01-api2.md").is_file()
 
-    detail = await client.get(f"/api/kbs/{kb['id']}")
-    assert detail.status_code == 200
-    assert detail.json()["name"] == "Git API 库"
+    public = (await client.get("/api/settings")).json()
+    assert public["git"]["strategy"] == "local"
+    assert public["git"]["autoSync"] is True
 
-    bad = await client.put(
-        f"/api/kbs/{kb['id']}/git/settings",
-        json={"pushCommand": "echo nope"},
-    )
+    bad = await client.put("/api/git/settings", json={"pushCommand": "echo nope"})
     assert bad.status_code == 400
     assert bad.json()["error"]["code"] == "invalid_request"
 
     gh_settings = await client.put(
-        f"/api/kbs/{kb['id']}/git/settings",
+        "/api/git/settings",
         json={"pullCommand": "gh repo sync A-Button/KnowledgeLib"},
     )
     assert gh_settings.status_code == 200, gh_settings.text
     assert gh_settings.json()["settings"]["pullCommand"].startswith("gh ")
 
-    missing = await client.get("/api/kbs/not-a-real-kb/git")
-    assert missing.status_code == 404
-
 
 @pytest.mark.asyncio
-async def test_git_api_remote_and_errors(client, tmp_path: Path):
-    created = await client.post("/api/kbs", json={"name": "Git 错误库"})
+async def test_git_api_errors_and_legacy_migration(client, tmp_path: Path):
+    created = await client.post("/api/kbs", json={"name": "旧仓库库"})
     kb = created.json()
-    remote_a = make_remote(tmp_path / "a.git")
-    remote_b = make_remote(tmp_path / "b.git")
+    kb_dir = Path(kb["absPath"])
+    (kb_dir / ".git").mkdir()
+    remote = make_remote(tmp_path / "remote.git")
 
-    no_remote = await client.post(f"/api/kbs/{kb['id']}/git/sync", json={"direction": "push"})
+    no_remote = await client.post("/api/git/init", json={})
     assert no_remote.status_code == 409
-    assert no_remote.json()["error"]["code"] == "git_not_initialized"
+    assert no_remote.json()["error"]["code"] == "git_legacy_repos"
+    assert "旧仓库库" in no_remote.json()["error"]["details"]["repos"]
 
-    await client.post(f"/api/kbs/{kb['id']}/git/init", json={"remoteUrl": str(remote_a)})
-    changed = await client.put(
-        f"/api/kbs/{kb['id']}/git/remote",
-        json={"url": str(remote_b)},
+    migrated = await client.post(
+        "/api/git/init",
+        json={"remoteUrl": str(remote), "migrateLegacy": True},
     )
+    assert migrated.status_code == 200, migrated.text
+    assert migrated.json()["git"]["legacyRepos"] == []
+    assert not (kb_dir / ".git").exists()
+    assert any((tmp_path / "data" / "trash" / "git-repos").glob("*/旧仓库库/.git"))
+
+    changed = await client.put("/api/git/remote", json={"url": str(remote)})
     assert changed.status_code == 200, changed.text
-    assert changed.json()["git"]["remoteUrl"] == str(remote_b)
+    assert changed.json()["git"]["remoteUrl"] == str(remote)
 
-    bad_remote = await client.put(
-        f"/api/kbs/{kb['id']}/git/remote",
-        json={"url": "ext::sh -c id"},
-    )
+    bad_remote = await client.put("/api/git/remote", json={"url": "ext::sh -c id"})
     assert bad_remote.status_code == 400
+
+    old_route = await client.get(f"/api/kbs/{kb['id']}/git")
+    assert old_route.status_code == 404
