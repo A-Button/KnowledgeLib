@@ -16,7 +16,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from .errors import ApiError
@@ -221,8 +221,10 @@ class GitService:
         config: Any,
         environ: Mapping[str, str] | None = None,
         poll_seconds: float = 30.0,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
+        self.on_change = on_change
         self.environ = dict(os.environ)
         if environ:
             self.environ.update({str(key): str(value) for key, value in environ.items()})
@@ -240,6 +242,14 @@ class GitService:
     def update_settings(self, patch: Mapping[str, Any]) -> dict[str, Any]:
         self.config.update({"git": patch})
         return self.settings()
+
+    def _notify_change(self) -> None:
+        if not self.on_change:
+            return
+        try:
+            self.on_change()
+        except Exception:
+            pass
 
     def _record_attempt(self, at: str, direction: str) -> None:
         self.config.patch_git_state({"lastAttemptAt": at, "lastDirection": direction})
@@ -637,6 +647,7 @@ class GitService:
         try:
             self._record_attempt(utc_now_iso(), direction)
             result = self._sync_locked(self.root(), direction, chosen, trigger, settings)
+            self._notify_change()
             self._record_result("ok", result.get("message", "同步完成"), direction)
             return result
         except ApiError as exc:

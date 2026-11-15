@@ -43,10 +43,16 @@ class AppState:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir = Path(config_dir).expanduser().resolve() if config_dir else default_config_dir(environ)
         self.config = ConfigStore(self.config_dir, self.data_dir, environ)
-        self.git = GitService(self.config, environ)
         self.index_cache = IndexCache()
+        self.git = GitService(self.config, environ, on_change=self.invalidate_library)
         self._locks: dict[str, asyncio.Lock] = {}
         self._guard = threading.Lock()
+
+    def invalidate_library(self) -> None:
+        try:
+            self.index_cache.invalidate_dir(self.config.kb_root())
+        except Exception:
+            pass
 
     def generation_lock(self, directory: Path) -> asyncio.Lock:
         key = str(Path(directory).resolve())
