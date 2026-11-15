@@ -465,8 +465,8 @@
       var last = git.lastCommit;
       var lastText = last ? (esc(last.short) + ' · ' + esc(last.subject) + ' · ' + KL.ui.relativeTime(last.at)) : '还没有提交';
       var upstreamText = git.upstream ? '跟踪 ' + esc(git.upstream) : '未设置上游分支';
-      var ahead = git.ahead == null ? 0 : git.ahead;
-      var behind = git.behind == null ? 0 : git.behind;
+      var ahead = git.ahead == null ? '—' : git.ahead;
+      var behind = git.behind == null ? '—' : git.behind;
       var syncText = git.upstream ? ('↑' + ahead + ' · ↓' + behind) : '—';
       var conflictHtml = '';
       if (git.conflicts && git.conflicts.length) {
@@ -477,7 +477,8 @@
       body = '<div class="git-status-grid">'
         + '<div class="git-stat"><span>分支</span><strong class="mono">' + esc(git.branch || 'main') + '</strong><small>' + upstreamText + '</small></div>'
         + '<div class="git-stat git-stat--wide"><span>远端</span><strong class="git-remote" title="' + val(git.remoteUrl) + '">' + (git.remoteUrl ? esc(git.remoteUrl) : '未设置') + '</strong><small>' + (git.remoteUrl ? 'origin' : '请先保存 remote') + '</small></div>'
-        + '<div class="git-stat git-stat--wide"><span>范围</span><strong class="git-remote" title="' + val(root) + '">' + esc(root || '—') + '</strong><small>' + esc(git.kbCount || 0) + ' 个知识库 · 整个文库集</small></div>'
+        + '<div class="git-stat git-stat--wide"><span>范围</span><strong class="git-remote" title="' + val(root) + '">' + esc(root || '—') + '</strong><small>' + esc(git.kbCount || 0) + ' 个知识库 · 整个文库集'
+        + (git.folderMode ? ' · 仓库目录 <span class="mono">' + esc(git.remoteDir) + '/</span>' : ' · 仓库根目录') + '</small></div>'
         + '<div class="git-stat"><span>工作区</span><strong>' + (git.dirty ? esc(git.changedFiles) + ' 个改动' : '干净') + '</strong><small>' + (git.changed && git.changed.length ? esc(git.changed.slice(0, 3).join(' · ')) : '没有待提交内容') + '</small></div>'
         + '<div class="git-stat"><span>本地 / 远端</span><strong class="mono">' + syncText + '</strong><small>' + (git.upstream ? '领先 / 落后提交数' : '完成首次拉取或推送后显示') + '</small></div>'
         + '<div class="git-stat git-stat--wide"><span>最近提交</span><strong class="git-last-commit">' + lastText + '</strong><small>' + (settings.autoSync ? '自动同步：每 ' + esc(settings.intervalMinutes || 15) + ' 分钟 · ' + esc(gitDirectionLabel(settings.autoDirection)) : '自动同步未开启') + '</small></div>'
@@ -493,7 +494,7 @@
         + '<div class="git-last' + lastClass + '">' + (git.lastMessage ? '最近结果：' + esc(git.lastMessage) : '') + '</div>'
         + '<div class="git-remote-row"><div class="field" style="flex:1"><label>Remote URL</label>'
         + '<input class="input" id="git-remote" type="text" value="' + val(git.remoteUrl) + '" placeholder="https://github.com/user/repo.git">'
-        + '<div class="hint">作用于整个知识库根目录，而不是单个知识库；也支持 SSH、file:// 与本地路径。remote 名称固定为 origin。</div></div>'
+        + '<div class="hint">作用于整个知识库根目录，而不是单个知识库；也支持 SSH、file:// 与本地路径。remote 名称固定为 origin；重新保存会重置「仓库内目录」的同步快照。</div></div>'
         + '<button class="btn btn-primary" id="git-save-remote">保存 remote</button></div>'
         + '<div class="git-settings">'
         + '<div class="git-settings-head"><strong>全局自动同步与冲突处理</strong><span class="hint">设置写入用户配置 settings.json 的 git 段；服务每 30 秒检查一次，到期才执行。</span></div>'
@@ -503,9 +504,11 @@
         + field('自动方向', select('git-direction', [['sync', '先拉后推'], ['pull', '仅拉取'], ['push', '仅推送']], settings.autoDirection || 'sync'))
         + field('冲突处理', select('git-strategy', [['abort', '停止并保留现场'], ['local', '优先本地'], ['remote', '优先远端'], ['manual', '保留冲突待手工']], settings.strategy || 'abort'))
         + '<label class="check-line"><input type="checkbox" id="git-auto-commit"' + (settings.autoCommit === false ? '' : ' checked') + '> <span>同步前自动提交本地改动</span></label>'
+        + '<div class="span-2">' + field('仓库内目录（可选）', input('git-remote-dir', settings.remoteDir || '', '留空 = 仓库根目录，例如 KnowledgeLib')) + '</div>'
+        + '<div class="span-2 hint" style="margin-top:-8px">把整个文库集上传到远端仓库的这个文件夹；支持多级目录与自定义名称，仓库内其他文件不受影响。留空时同步到仓库根目录。首次同步前若远端目录已有文件，请先点「拉取」合并。</div>'
         + '</div>'
         + '<details class="git-advanced"><summary>自定义推送 / 拉取命令（可选）</summary>'
-        + '<p class="hint">命令必须以 <span class="mono">git</span> 或 <span class="mono">gh</span> 开头，不经过 shell；gh 需已安装并登录。支持占位符 <span class="mono">{branch}</span>、<span class="mono">{remote}</span>、<span class="mono">{url}</span>、<span class="mono">{kb}</span>。留空则使用内置的 fetch/merge 与 push。</p>'
+        + '<p class="hint">命令必须以 <span class="mono">git</span> 或 <span class="mono">gh</span> 开头，不经过 shell；gh 需已安装并登录。支持占位符 <span class="mono">{branch}</span>、<span class="mono">{remote}</span>、<span class="mono">{url}</span>、<span class="mono">{kb}</span>、<span class="mono">{dir}</span>。留空则使用内置的 fetch/merge 与 push；填写自定义命令时会覆盖「仓库内目录」映射。</p>'
         + '<div class="form-grid">'
         + '<div class="span-2">' + field('自定义拉取命令', input('git-pull-command', settings.pullCommand || '', 'git pull --rebase origin {branch}')) + '</div>'
         + '<div class="span-2">' + field('自定义推送命令', input('git-push-command', settings.pushCommand || '', 'git push origin {branch}')) + '</div>'
@@ -517,7 +520,7 @@
     }
     return '<section class="card git-card" id="git-card">'
       + '<div class="card-head"><div><h2 class="card-title"><span class="no">GIT</span>文库集 Git 同步</h2>'
-      + '<p class="card-sub">整个知识库根目录共用一个仓库、一个 remote 与一套同步设置。</p></div>' + gitBadge(git) + '</div>'
+      + '<p class="card-sub">整个知识库根目录共用一个仓库、一个 remote 与一套同步设置；可指定上传到仓库内的自定义文件夹。</p></div>' + gitBadge(git) + '</div>'
       + body + '</section>';
   }
 
@@ -602,6 +605,7 @@
             intervalMinutes: interval,
             autoDirection: byId('git-direction').value,
             strategy: byId('git-strategy').value,
+            remoteDir: byId('git-remote-dir').value.trim(),
             pullCommand: byId('git-pull-command').value.trim(),
             pushCommand: byId('git-push-command').value.trim()
           });
