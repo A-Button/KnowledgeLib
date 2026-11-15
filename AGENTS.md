@@ -11,6 +11,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 测试：pytest + 本地 Python Mock 上游，禁止使用真实 API Key 或访问外部模型服务。
 - 配置：保存在用户目录（Windows `%APPDATA%\KnowledgeLib\settings.json`），不要提交到仓库。
 - 运行时数据：`data/`（知识库、回收站、缓存）不进入版本控制。
+- Git 同步：每个知识库可初始化独立仓库；remote 存在 `.git/config`，同步偏好存在用户配置目录的 `git-sync.json`。
 
 ## 硬性收尾流程
 
@@ -61,10 +62,10 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 
 ## 测试纪律
 
-- 所有测试必须离线运行，只使用 `tests/mock_upstream.py` 或内存临时目录。
+- 所有测试必须离线运行，只使用 `tests/mock_upstream.py`、内存临时目录或临时本地 Git 裸仓库。
 - 不把真实 API Key 写进测试、命令、提交信息或日志。
 - 修 bug 时先补能复现问题的测试，再改实现；不允许通过删除/跳过测试让套件变绿。
-- 当前基线是 **78 个 pytest 用例**；新增功能应同步增加测试并更新 README 中的数量。
+- 当前基线是 **88 个 pytest 用例**；新增功能应同步增加测试并更新 README 中的数量。
 - 前端改动至少要被 `tests/test_static.py` 的 `node --check` 与 `byId` 检查覆盖。
 
 ## 版本控制纪律
@@ -86,6 +87,9 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 知识库/学习路径重命名只改 `.kb.json` / `.path.json` 的 `name`，不改目录名、slug 与文件内容。
 - 前端静态资源改动后，提醒用户重启后端（若改 Python）并 Ctrl+F5；后端改动只刷新页面不会生效。
 - 主题/液态玻璃/无衬线开关只存浏览器 `localStorage`；liquidGL 本地 vendored 且为 MIT，CSP 需要 `worker-src 'self' blob:`。
+- Git 同步设置（自动同步、间隔、方向、冲突策略、自定义命令）只存用户配置目录的 `git-sync.json`；remote 存在知识库的 `.git/config`，不得写进 `.kb.json` 或提交进仓库。
+- 自定义 Git 命令必须以 `git` 开头、不经 shell 执行，并拒绝 `-C` / `--git-dir` / `--work-tree` 等切仓参数；错误信息中的 remote URL 要脱敏。
+- 后台自动同步线程只在服务 lifespan 内启动；测试用临时裸仓库，不得访问 GitHub 等外部远端。
 
 ## 本机环境备注
 

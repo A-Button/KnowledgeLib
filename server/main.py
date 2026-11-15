@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -17,9 +18,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import __version__
 from .config import ConfigStore
 from .errors import ApiError, envelope
+from .git_sync import GitService
 from .indexer import IndexCache
 from .middleware import Middleware
 from .routes_chat import router as chat_router
+from .routes_git import router as git_router
 from .routes_library import router as library_router
 from .routes_settings import router as settings_router
 from .routes_web import router as web_router
@@ -40,6 +43,7 @@ class AppState:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir = Path(config_dir).expanduser().resolve() if config_dir else default_config_dir(environ)
         self.config = ConfigStore(self.config_dir, self.data_dir, environ)
+        self.git = GitService(self.config_dir, environ)
         self.index_cache = IndexCache()
         self._locks: dict[str, asyncio.Lock] = {}
         self._guard = threading.Lock()
@@ -73,18 +77,28 @@ def create_app(
     state = AppState(data_path, environ, config_path)
     (WEB_DIR / "assets").mkdir(parents=True, exist_ok=True)
 
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        state.git.start_scheduler(state.config.kb_root)
+        try:
+            yield
+        finally:
+            state.git.stop_scheduler()
+
     app = FastAPI(
         title="KnowledgeLib",
         version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.state.kl = state
     quiet = bool(env.get("KL_QUIET"))
     app.add_middleware(Middleware, enabled_log=not quiet)
 
     app.include_router(settings_router)
+    app.include_router(git_router)
     app.include_router(library_router)
     app.include_router(web_router)
     app.include_router(chat_router)

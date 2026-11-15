@@ -414,6 +414,206 @@
     return Math.max(4, Math.min(12, Math.round(total / 5)));
   }
 
+  // ------------------------------------------------------------------ git
+  function gitBadge(git) {
+    if (!git || git.available === false) return '<span class="badge badge--danger">Git 不可用</span>';
+    if (!git.managed) return '<span class="badge">未初始化</span>';
+    if (git.conflicts && git.conflicts.length) return '<span class="badge badge--danger">有冲突</span>';
+    if (git.dirty) return '<span class="badge badge--brass">有本地改动</span>';
+    return '<span class="badge badge--moss">已初始化</span>';
+  }
+
+  function gitDirectionLabel(value) {
+    return ({ sync: '先拉后推', pull: '仅拉取', push: '仅推送' })[value] || '先拉后推';
+  }
+
+  function gitStrategyLabel(value) {
+    return ({ abort: '停止并保留现场', local: '优先本地', remote: '优先远端', manual: '保留冲突待手工' })[value] || '停止并保留现场';
+  }
+
+  function gitConflictText(git) {
+    var list = (git && git.conflicts) || [];
+    if (!list.length) return '';
+    return '冲突文件：' + list.slice(0, 8).join('、') + (list.length > 8 ? ' 等 ' + list.length + ' 个' : '');
+  }
+
+  function renderGitCard() {
+    var git = KL.state.git || {};
+    var settings = git.settings || {};
+    var body;
+    if (git.available === false) {
+      body = '<div class="form-error">' + esc(git.error || '当前环境没有可用的 Git。') + '</div>'
+        + '<p class="hint" style="margin-top:12px">安装 Git 并确保 <span class="mono">git</span> 在 PATH 中，然后刷新本页。Git 只在本机执行，不会上传任何资料到本应用以外的服务。</p>';
+    } else if (!git.managed) {
+      body = '<p class="settings-note">为「' + esc((KL.state.kb && KL.state.kb.name) || '这个知识库') + '」创建独立 Git 仓库。初始化会把当前全部资料提交为第一个版本；remote 可稍后再填。</p>'
+        + '<div class="form-grid" style="margin-top:16px">'
+        + '<div class="span-2">' + field('远端地址（可选）', input('git-remote-init', '', 'https://github.com/user/repo.git 或 git@github.com:user/repo.git')) + '</div>'
+        + field('分支', input('git-branch-init', 'main', 'main'))
+        + '</div>'
+        + '<div class="row" style="margin-top:16px"><button class="btn btn-primary" id="git-init">' + icon('git') + '初始化 Git 仓库</button>'
+        + '<span class="hint">也可以在仓库初始化后，再单独保存 remote。</span></div>'
+        + '<div class="form-error" id="git-error" hidden></div>';
+    } else {
+      var last = git.lastCommit;
+      var lastText = last ? (esc(last.short) + ' · ' + esc(last.subject) + ' · ' + KL.ui.relativeTime(last.at)) : '还没有提交';
+      var upstreamText = git.upstream ? '跟踪 ' + esc(git.upstream) : '未设置上游分支';
+      var ahead = git.ahead == null ? 0 : git.ahead;
+      var behind = git.behind == null ? 0 : git.behind;
+      var syncText = git.upstream ? ('↑' + ahead + ' · ↓' + behind) : '—';
+      var conflictHtml = '';
+      if (git.conflicts && git.conflicts.length) {
+        conflictHtml = '<div class="git-warning"><strong>有未解决的冲突</strong><span>' + esc(gitConflictText(git))
+          + '。当前策略：' + esc(gitStrategyLabel(settings.strategy)) + '。切换策略后再次同步，或手工解决。</span></div>';
+      }
+      var lastClass = git.lastStatus === 'error' ? ' is-bad' : (git.lastStatus === 'ok' ? ' is-ok' : '');
+      body = '<div class="git-status-grid">'
+        + '<div class="git-stat"><span>分支</span><strong class="mono">' + esc(git.branch || 'main') + '</strong><small>' + upstreamText + '</small></div>'
+        + '<div class="git-stat git-stat--wide"><span>远端</span><strong class="git-remote" title="' + val(git.remoteUrl) + '">' + (git.remoteUrl ? esc(git.remoteUrl) : '未设置') + '</strong><small>' + (git.remoteUrl ? 'origin' : '请先保存 remote') + '</small></div>'
+        + '<div class="git-stat"><span>工作区</span><strong>' + (git.dirty ? esc(git.changedFiles) + ' 个改动' : '干净') + '</strong><small>' + (git.changed && git.changed.length ? esc(git.changed.slice(0, 3).join(' · ')) : '没有待提交内容') + '</small></div>'
+        + '<div class="git-stat"><span>本地 / 远端</span><strong class="mono">' + syncText + '</strong><small>' + (git.upstream ? '领先 / 落后提交数' : '完成首次拉取或推送后显示') + '</small></div>'
+        + '<div class="git-stat git-stat--wide"><span>最近提交</span><strong class="git-last-commit">' + lastText + '</strong><small>' + (settings.autoSync ? '自动同步：每 ' + esc(settings.intervalMinutes || 15) + ' 分钟 · ' + esc(gitDirectionLabel(settings.autoDirection)) : '自动同步未开启') + '</small></div>'
+        + '</div>'
+        + conflictHtml
+        + '<div class="row git-actions">'
+        + '<button class="btn btn-accent" id="git-sync">' + icon('refresh') + '立即同步</button>'
+        + '<button class="btn btn-ghost" id="git-pull">拉取</button>'
+        + '<button class="btn btn-ghost" id="git-push">推送</button>'
+        + '<button class="btn btn-ghost btn-sm" id="git-refresh">' + icon('refresh') + '刷新状态</button>'
+        + '<span class="git-last' + lastClass + '">' + (git.lastSyncAt ? '上次成功：' + KL.ui.formatDate(git.lastSyncAt) : '尚未同步') + '</span>'
+        + '</div>'
+        + '<div class="git-last' + lastClass + '">' + (git.lastMessage ? '最近结果：' + esc(git.lastMessage) : '') + '</div>'
+        + '<div class="git-remote-row"><div class="field" style="flex:1"><label>Remote URL</label>'
+        + '<input class="input" id="git-remote" type="text" value="' + val(git.remoteUrl) + '" placeholder="https://github.com/user/repo.git">'
+        + '<div class="hint">也支持 SSH、file:// 与本地路径。remote 名称固定为 origin。</div></div>'
+        + '<button class="btn btn-primary" id="git-save-remote">保存 remote</button></div>'
+        + '<div class="git-settings">'
+        + '<div class="git-settings-head"><strong>自动同步与冲突处理</strong><span class="hint">由本地服务每 30 秒检查一次，到期才执行。</span></div>'
+        + '<div class="form-grid">'
+        + '<label class="check-line"><input type="checkbox" id="git-auto-sync"' + (settings.autoSync ? ' checked' : '') + '> <span>开启自动同步</span></label>'
+        + field('间隔（分钟）', input('git-interval', settings.intervalMinutes || 15, '15', 'number'))
+        + field('自动方向', select('git-direction', [['sync', '先拉后推'], ['pull', '仅拉取'], ['push', '仅推送']], settings.autoDirection || 'sync'))
+        + field('冲突处理', select('git-strategy', [['abort', '停止并保留现场'], ['local', '优先本地'], ['remote', '优先远端'], ['manual', '保留冲突待手工']], settings.strategy || 'abort'))
+        + '<label class="check-line"><input type="checkbox" id="git-auto-commit"' + (settings.autoCommit === false ? '' : ' checked') + '> <span>同步前自动提交本地改动</span></label>'
+        + '</div>'
+        + '<details class="git-advanced"><summary>自定义推送 / 拉取命令（可选）</summary>'
+        + '<p class="hint">命令必须以 <span class="mono">git</span> 开头，不经过 shell；支持占位符 <span class="mono">{branch}</span>、<span class="mono">{remote}</span>、<span class="mono">{url}</span>、<span class="mono">{kb}</span>。留空则使用内置的 fetch/merge 与 push。</p>'
+        + '<div class="form-grid">'
+        + '<div class="span-2">' + field('自定义拉取命令', input('git-pull-command', settings.pullCommand || '', 'git pull --rebase origin {branch}')) + '</div>'
+        + '<div class="span-2">' + field('自定义推送命令', input('git-push-command', settings.pushCommand || '', 'git push origin {branch}')) + '</div>'
+        + '</div></details>'
+        + '<div class="row" style="margin-top:14px"><button class="btn btn-primary" id="git-save-settings">保存同步设置</button>'
+        + '<span class="hint">手动同步会使用当前设置；拉取后会自动刷新知识库索引。</span></div>'
+        + '</div>'
+        + '<div class="form-error" id="git-error" hidden></div>';
+    }
+    return '<section class="card git-card" id="git-card">'
+      + '<div class="card-head"><div><h2 class="card-title"><span class="no">02</span>Git 同步</h2>'
+      + '<p class="card-sub">版本管理、远端备份与冲突处理。</p></div>' + gitBadge(git) + '</div>'
+      + body + '</section>';
+  }
+
+  function showGitError(err) {
+    var box = byId('git-error');
+    var message = err && err.message ? err.message : 'Git 操作失败';
+    var payload = err && err.details && err.details.error ? err.details.error.details : null;
+    if (payload && payload.conflicts && payload.conflicts.length) {
+      message += '：' + payload.conflicts.slice(0, 8).join('、');
+    }
+    if (box) {
+      box.textContent = message;
+      box.hidden = false;
+    } else {
+      KL.ui.toast(message, 'error');
+    }
+  }
+
+  async function reloadGitCard(kbId) {
+    try {
+      KL.state.git = await KL.api.get('/api/kbs/' + encodeURIComponent(kbId) + '/git');
+    } catch (err) {
+      KL.state.git = { available: false, managed: false, error: err.message, settings: {} };
+    }
+    var card = byId('git-card');
+    if (card) {
+      card.outerHTML = renderGitCard();
+      bindGitCard();
+    }
+  }
+
+  function bindGitCard() {
+    var kb = KL.state.kb || {};
+    if (!kb.id || !byId('git-card')) return;
+    var runGitAction = async function (button, task, refreshOnError) {
+      button.disabled = true;
+      try {
+        await task();
+      } catch (err) {
+        if (refreshOnError) await reloadGitCard(kb.id);
+        showGitError(err);
+        button.disabled = false;
+      }
+    };
+    var init = byId('git-init');
+    if (init) {
+      init.addEventListener('click', function () {
+        runGitAction(init, async function () {
+          await KL.api.post('/api/kbs/' + encodeURIComponent(kb.id) + '/git/init', {
+            remoteUrl: byId('git-remote-init').value.trim(),
+            branch: byId('git-branch-init').value.trim() || 'main'
+          });
+          KL.ui.toast('Git 仓库已初始化并提交', 'ok');
+          await reloadGitCard(kb.id);
+        });
+      });
+    }
+    var saveRemote = byId('git-save-remote');
+    if (saveRemote) {
+      saveRemote.addEventListener('click', function () {
+        runGitAction(saveRemote, async function () {
+          await KL.api.put('/api/kbs/' + encodeURIComponent(kb.id) + '/git/remote', {
+            url: byId('git-remote').value.trim()
+          });
+          KL.ui.toast('Remote 已保存', 'ok');
+          await reloadGitCard(kb.id);
+        });
+      });
+    }
+    var saveSettings = byId('git-save-settings');
+    if (saveSettings) {
+      saveSettings.addEventListener('click', function () {
+        runGitAction(saveSettings, async function () {
+          var interval = Number(byId('git-interval').value);
+          await KL.api.put('/api/kbs/' + encodeURIComponent(kb.id) + '/git/settings', {
+            autoSync: !!byId('git-auto-sync').checked,
+            autoCommit: !!byId('git-auto-commit').checked,
+            intervalMinutes: interval,
+            autoDirection: byId('git-direction').value,
+            strategy: byId('git-strategy').value,
+            pullCommand: byId('git-pull-command').value.trim(),
+            pushCommand: byId('git-push-command').value.trim()
+          });
+          KL.ui.toast('同步设置已保存', 'ok');
+          await reloadGitCard(kb.id);
+        });
+      });
+    }
+    [['git-sync', 'sync'], ['git-pull', 'pull'], ['git-push', 'push']].forEach(function (item) {
+      var button = byId(item[0]);
+      if (!button) return;
+      button.addEventListener('click', function () {
+        runGitAction(button, async function () {
+          var result = await KL.api.post('/api/kbs/' + encodeURIComponent(kb.id) + '/git/sync', {
+            direction: item[1]
+          });
+          KL.ui.toast(result.result && result.result.message ? result.result.message : '同步完成', 'ok');
+          await reloadGitCard(kb.id);
+        }, true);
+      });
+    });
+    var refresh = byId('git-refresh');
+    if (refresh) refresh.addEventListener('click', function () { reloadGitCard(kb.id); });
+  }
+
   function renderKb() {
     var kb = KL.state.kb || {};
     var settings = KL.state.settings || {};
@@ -452,7 +652,7 @@
       + '<button class="btn btn-accent" id="start-gen"' + (hasKey ? '' : ' disabled') + '>' + icon('spark') + '生成学习路径</button>'
       + '</div><div class="form-error" id="gen-form-error" hidden></div></div>';
 
-    var list = '<div class="card"><div class="card-head"><div><h2 class="card-title"><span class="no">02</span>已有学习路径</h2>'
+    var list = '<div class="card"><div class="card-head"><div><h2 class="card-title"><span class="no">03</span>已有学习路径</h2>'
       + '<p class="card-sub">' + paths.length + ' 条路径 · ' + paths.reduce(function (sum, item) { return sum + (item.files || []).length; }, 0) + ' 个编号文件</p></div></div>';
     if (!paths.length) {
       list += '<div class="hint">还没有学习路径。填写上面的表单，生成第一条。</div>';
@@ -472,7 +672,7 @@
     }
     list += '</div>';
 
-    return page(head + form + list);
+    return page(head + form + renderGitCard() + list);
   }
 
   function bindKb(root) {
@@ -541,6 +741,7 @@
         KL.app.go('#/library');
       } catch (err) { KL.ui.toast(err.message, 'error'); }
     });
+    bindGitCard();
   }
 
   KL.views = { renderSettings: renderSettings, bindSettings: bindSettings, renderLibrary: renderLibrary, bindLibrary: bindLibrary, renderKb: renderKb, bindKb: bindKb, openRenameDialog: openRenameDialog };

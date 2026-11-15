@@ -19,7 +19,8 @@
     },
     generation: null,
     openFile: null,
-    highlights: {}
+    highlights: {},
+    git: null
   };
 
   var routeToken = 0;
@@ -49,6 +50,19 @@
     }
     if (!state.chat.kbId && state.kbs.length) state.chat.kbId = state.kbs[0].id;
     updateRail();
+  }
+
+  async function loadGit(kbId) {
+    try {
+      return await KL.api.get('/api/kbs/' + encodeURIComponent(kbId) + '/git');
+    } catch (err) {
+      return {
+        available: false,
+        managed: false,
+        error: err.message || '读取 Git 状态失败',
+        settings: {}
+      };
+    }
   }
 
   async function refreshBase() {
@@ -85,6 +99,7 @@
 
       if (parsed.name === 'kb') {
         state.kb = await KL.api.get('/api/kbs/' + encodeURIComponent(parsed.kbId));
+        state.git = await loadGit(parsed.kbId);
       } else if (parsed.name === 'path') {
         var pair = await Promise.all([
           KL.api.get('/api/kbs/' + encodeURIComponent(parsed.kbId)),
@@ -92,9 +107,11 @@
         ]);
         state.kb = pair[0];
         state.path = pair[1];
+        state.git = null;
       } else {
         state.kb = null;
         state.path = null;
+        state.git = null;
       }
       if (token !== routeToken) return;
       KL.views.renderView();

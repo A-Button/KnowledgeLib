@@ -28,7 +28,8 @@
     chevron: '<path d="m6 9 6 6 6-6"/>',
     download: '<path d="M12 3v12M7 10l5 5 5-5M5 20h14"/>',
     edit: '<path d="m4 20 4-1 11-11-3-3L5 16Z"/><path d="m14 6 3 3"/>',
-    more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>'
+    more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+    git: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="11" r="2"/><path d="M6 8v8M8 6h4a4 4 0 0 1 4 4v0M8 18h4a4 4 0 0 0 4-4"/>'
   };
 
   function byId(id) { return document.getElementById(id); }
