@@ -4,7 +4,7 @@
 
 后端 Python 3.11+ / FastAPI / Uvicorn / httpx（uv 管理，默认 USTC 镜像）；前端原生 HTML / CSS / JavaScript，无构建步骤、无外部 CDN 与外部字体；测试用 pytest + 本地 Python Mock 上游，全程离线，不接触真实 API Key。
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white) ![Tests](https://img.shields.io/badge/pytest-88%20offline%20tests-0A9EDC?logo=pytest&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-2ea44f)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white) ![Tests](https://img.shields.io/badge/pytest-112%20offline%20tests-0A9EDC?logo=pytest&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-2ea44f)
 
 ## 目录
 
@@ -21,7 +21,7 @@
 - **阅读助手**：仅知识库 / 联网增强 / 纯对话三种模式，当前文件与当前路径文件列表自动作为上下文；`read` / `edit` / `write` / `highlight` 四个文档工具可在顶部开关。
 - **检索与联网**：中文友好的分词 + BM25；DeepSeek 模型可用服务端联网与四档思考强度，其他 OpenAI 兼容服务走应用侧 Search / Fetch 代理。
 - **管理与外观**：知识库 / 学习路径可重命名（只写元数据），删除进 `data/trash/`；档案室与现代两套主题，现代主题可开液态玻璃或禁用衬线字体。
-- **Git 同步**：整个知识库根目录共用一个仓库，一次同步所有知识库；支持绑定 origin、手动或按间隔自动同步、四种冲突策略，以及 `git` / `gh` 自定义命令。
+- **Git 同步**：整个知识库根目录共用一个仓库，一次同步所有知识库；支持绑定 origin、手动或按间隔自动同步、四种冲突策略，可把文库集上传到仓库内自定义名称的子文件夹，以及 `git` / `gh` 自定义命令。
 
 ## 界面截图
 
@@ -139,14 +139,17 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：**函数工�
 | 初始化 | 在知识库根目录建立仓库（默认分支 main），写入基础 .gitignore，把全部知识库提交为首个版本；可同时填写远端。 |
 | Remote | 支持 HTTPS、SSH、file:// 与本地路径，固定为 origin；远端地址存在根目录的 .git/config，不写进任何知识库元数据，凭据沿用系统 Git 配置。 |
 | 范围 | 根目录下所有知识库、学习路径和 Markdown 资料一次性提交、拉取和推送。 |
+| 仓库内目录 | 可选；把整个文库集上传到远端仓库的指定文件夹，支持多级路径与自定义名称（如 `知识库` 或 `notes/kb`）。同步只替换该文件夹，仓库内 README、其他目录等文件保持不变；留空时同步到仓库根目录。首次同步时若远端目录已有文件，需先拉取导入；拉取以远端目录为准，远端删除文件或整个目录会同步删除本地对应内容（有本地改动时按冲突策略处理）；重复同步不会产生空提交。 |
 | 手动操作 | 拉取、推送、立即同步（先拉后推）与刷新状态；拉取使用 fetch + merge，不改写本地提交。 |
 | 自动同步 | 全局间隔 1..1440 分钟，方向为「先拉后推 / 仅拉取 / 仅推送」；服务每 30 秒检查一次，到期才执行，默认关闭。 |
 | 自动提交 | 默认开启：同步前若有改动，先 git add -A 并创建同步提交；关闭时遇到未提交改动会拒绝同步。 |
 | 冲突处理 | 「停止并保留现场」中止合并并保留本地文件；「优先本地 / 优先远端」自动取一侧；「保留冲突待手工」留下冲突标记，解决后再同步。 |
-| 自定义命令 | 可分别覆盖拉取与推送命令；命令必须以 git 或 gh 开头、不经 shell，支持 {branch}、{remote}、{url}、{kb} 占位符，留空时使用内置命令。gh 需已安装并登录。 |
+| 自定义命令 | 可分别覆盖拉取与推送命令；命令必须以 git 或 gh 开头、不经 shell，支持 {branch}、{remote}、{url}、{kb}、{dir} 占位符，留空时使用内置命令。gh 需已安装并登录。自定义命令会覆盖内置的「仓库内目录」映射。 |
 | 旧仓库迁移 | 若检测到知识库目录内仍有旧版每库 .git，可勾选迁移，把旧仓库备份到 data/trash/git-repos 后再建立根仓库。 |
 
-同步设置写入用户配置 settings.json 的 git 段（不再使用 git-sync.json）；remote 存在知识库根目录的 .git/config。服务端设置 GIT_TERMINAL_PROMPT=0，需要交互输入密码时直接失败，避免后台任务挂起。
+同步设置写入用户配置 settings.json 的 git 段（不再使用 git-sync.json）；remote 存在知识库根目录的 .git/config。指定「仓库内目录」时，内置同步会在本地 `refs/kl/base`、`refs/kl/tip`、`refs/kl/local` 记录远端目录快照与同步进度，用于三路合并和领先 / 落后计数；这些引用只存在本地仓库；重新保存 remote 会清空它们（切换远端或仓库被重建、强推后，用重新保存 remote 重置同步快照）。远端历史被替换时会拒绝同步而不是删除本地文件。服务端设置 GIT_TERMINAL_PROMPT=0，需要交互输入密码时直接失败，避免后台任务挂起。
+
+从根目录模式切换到「仓库内目录」后，远端原有根目录内容会保留（相当于多一份副本）；把「仓库内目录」改名或清空，也会在远端和本地留下旧目录。这些旧副本不会自动删除，确认无用后可手工整理。
 
 ## 配置与数据
 
@@ -195,7 +198,7 @@ data/
 
 ## 测试
 
-全部测试使用本地 Python Mock 上游与临时本地 Git 裸仓库（`tests/mock_upstream.py`），只监听 `127.0.0.1`，不访问外网与托管远端；当前共 **88 个 pytest 用例**。
+全部测试使用本地 Python Mock 上游与临时本地 Git 裸仓库（`tests/mock_upstream.py`），只监听 `127.0.0.1`，不访问外网与托管远端；当前共 **112 个 pytest 用例**。
 
 ```bash
 uv run pytest -q                    # 全量用例
@@ -211,7 +214,7 @@ uv run python tools/selfcheck.py    # AST + node --check + 全量 pytest → ALL
 - 检索与对话：中文 BM25、分块、缓存失效、对话引用、知识库 + 联网、Search / Fetch 代理与错误映射。
 - DeepSeek：联网 / 思考四种组合下的工具抑制、服务端 web_tools、思考参数、`reasoning_content` 回传、工具调用轮次。
 - 文档工具：`read` / `edit` / `write` / `highlight`、编号规范、编辑备份、路径穿越拒绝、highlight 匹配器（跨行、跨行内代码 / 粗体 / 链接、Markdown 标记剥离）。
-- 文库集 Git 同步：根目录单仓库、remote、全库自动提交与推送、拉取、本地 / 远端优先冲突、手工冲突恢复、旧每库仓库迁移、自定义命令与占位符、定时器、全局 Git API。
+- 文库集 Git 同步：根目录单仓库、remote、全库自动提交与推送、拉取、本地 / 远端优先冲突、手工冲突恢复、仓库内自定义子目录（推送保留仓库其他文件、拉取三路合并）、旧每库仓库迁移、自定义命令与占位符、定时器、全局 Git API。
 - 前端与脚本：静态资源、JS 语法、`byId` 引用、启动脚本守卫、主题资源顺序、现代主题 / 无衬线 CSS、liquidGL 许可与 CSP worker 放行。
 
 Mock 也可单独启动，用于无 Key 的界面演示：
@@ -243,7 +246,7 @@ uv run python -m tests.mock_upstream --port 8766
 | GET | `/api/git` | 文库集 Git 状态与全局设置 |
 | POST | `/api/git/init` | 初始化根仓库（可选 remote / 迁移旧仓库） |
 | PUT | `/api/git/remote` | 保存 origin remote |
-| PUT | `/api/git/settings` | 保存全局自动同步与冲突策略 |
+| PUT | `/api/git/settings` | 保存全局自动同步、冲突策略、仓库内目录与自定义命令 |
 | POST | `/api/git/sync` | 手动拉取 / 推送 / 同步整个文库集 |
 | POST | `/api/web/search` / `/api/web/fetch` | DeepSeek Search / Fetch 代理 |
 | POST | `/api/chat` | 对话（SSE；`stream=false` 返回 JSON） |

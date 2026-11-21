@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,12 @@ import pytest
 from server import library
 from server.config import ConfigStore
 from server.errors import ApiError
-from server.git_sync import GitService, validate_command, validate_remote_url
+from server.git_sync import (
+    GitService,
+    validate_command,
+    validate_remote_dir,
+    validate_remote_url,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 
@@ -68,6 +74,32 @@ def remote_edit(remote: Path, tmp_path: Path, filename: str, text: str) -> None:
     target.write_text(target.read_text(encoding="utf-8").split("\n\n")[0] + "\n\n" + text + "\n", encoding="utf-8")
     git("add", "-A", cwd=clone)
     git("commit", "-m", "remote edit", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+
+def seed_remote(remote: Path, tmp_path: Path, files: dict[str, str]) -> None:
+    clone = tmp_path / "seed-clone"
+    if clone.exists():
+        shutil.rmtree(clone)
+    clone_remote(remote, clone)
+    for name, text in files.items():
+        target = clone / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "seed remote", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+
+def edit_remote_file(remote: Path, tmp_path: Path, relative: str, text: str) -> None:
+    clone = tmp_path / "folder-remote-clone"
+    if clone.exists():
+        shutil.rmtree(clone)
+    clone_remote(remote, clone)
+    target = clone / relative
+    target.write_text(text, encoding="utf-8")
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "remote folder edit", cwd=clone)
     git("push", "origin", "main", cwd=clone)
 
 
@@ -274,3 +306,503 @@ def test_validation_and_legacy_migration(tmp_path: Path):
     with pytest.raises(ApiError):
         service.init_repo("", "bad branch")
     assert GitService(service.config)._env_value("ProgramFiles") == service._env_value("ProgramFiles")
+
+
+def test_folder_sync_preserves_repo_root(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    seed_remote(remote, tmp_path, {"README.md": "readme\n", "docs/keep.txt": "keep\n"})
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    settings = service.update_settings({"remoteDir": "知识库/"})
+    assert settings["remoteDir"] == "知识库"
+
+    result = service.sync("push")
+    assert "知识库" in result["message"]
+    clone = clone_remote(remote, tmp_path / "verify")
+    assert (clone / "README.md").read_text(encoding="utf-8") == "readme\n"
+    assert (clone / "docs" / "keep.txt").is_file()
+    assert (clone / "知识库" / "第一文库" / "01-基础.md").is_file()
+    assert (clone / "知识库" / "第二文库" / "01-进阶.md").is_file()
+    assert not (clone / "第一文库").exists()
+
+    status = service.status()
+    assert status["folderMode"] is True
+    assert status["remoteDir"] == "知识库"
+    assert status["dirty"] is False
+    assert status["ahead"] == 0
+    assert status["behind"] == 0
+
+
+def test_folder_pull_merges_remote_folder(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "notes/知识库"})
+    service.sync("push")
+
+    edit_remote_file(
+        remote,
+        tmp_path,
+        "notes/知识库/第一文库/01-基础.md",
+        "# 01 · 基础\n\n远端内容\n",
+    )
+    local = root / "第二文库" / "01-进阶.md"
+    local.write_text("# 01 · 进阶\n\n本地内容\n", encoding="utf-8")
+
+    result = service.sync("pull")
+    assert result["pulled"] is True
+    assert "远端内容" in (root / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+    assert "本地内容" in local.read_text(encoding="utf-8")
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["dirty"] is False
+    assert status["ahead"] >= 1
+    assert status["behind"] == 0
+
+    clone = clone_remote(remote, tmp_path / "add-clone")
+    added = clone / "notes" / "知识库" / "新目录" / "new.md"
+    added.parent.mkdir(parents=True)
+    added.write_text("# new\n", encoding="utf-8")
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "add remote file", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+    service.sync("pull")
+    assert (root / "新目录" / "new.md").is_file()
+
+
+def test_folder_conflict_strategies(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    edit_remote_file(remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端内容\n")
+    local = root / "第一文库" / "01-基础.md"
+    local.write_text("# 01 · 基础\n\n本地内容\n", encoding="utf-8")
+
+    with pytest.raises(ApiError) as aborted:
+        service.sync("pull", strategy="abort")
+    assert aborted.value.code == "git_conflict"
+    assert "本地内容" in local.read_text(encoding="utf-8")
+    assert not (root / ".git" / "MERGE_HEAD").exists()
+
+    result = service.sync("pull", strategy="remote")
+    assert result["conflictsResolved"] >= 1
+    assert "远端内容" in local.read_text(encoding="utf-8")
+    assert service.status()["conflicts"] == []
+
+
+def test_folder_manual_conflict_recovery_and_push_guard(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    edit_remote_file(remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端内容\n")
+    local = root / "第一文库" / "01-基础.md"
+    local.write_text("# 01 · 基础\n\n本地内容\n", encoding="utf-8")
+
+    with pytest.raises(ApiError) as manual:
+        service.sync("pull", strategy="manual")
+    assert manual.value.code == "git_conflict"
+    status = service.status()
+    assert status["conflicts"]
+    assert status["mergeInProgress"] is True
+    assert "<<<<<<<" in local.read_text(encoding="utf-8")
+
+    recovered = service.sync("sync", strategy="local")
+    assert recovered["conflictsResolved"] >= 1
+    assert "本地内容" in local.read_text(encoding="utf-8")
+    assert service.status()["conflicts"] == []
+
+    clone = clone_remote(remote, tmp_path / "recover-check")
+    assert "本地内容" in (clone / "kb" / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+
+    edit_remote_file(remote, tmp_path, "kb/第二文库/01-进阶.md", "# 01 · 进阶\n\n远端新内容\n")
+    with pytest.raises(ApiError) as rejected:
+        service.sync("push")
+    assert rejected.value.code == "git_push_rejected"
+
+
+def test_remote_dir_validation():
+    assert validate_remote_dir("") == ""
+    assert validate_remote_dir(None) == ""
+    assert validate_remote_dir(" 知识库/子目录/ ") == "知识库/子目录"
+    assert validate_remote_dir("notes\\kb") == "notes/kb"
+    for bad in (
+        "/abs/path",
+        "C:/abs",
+        "../up",
+        "a/../b",
+        "a//b",
+        ".git/x",
+        "-secret",
+        "a:b",
+        "a?b",
+        "x" * 101,
+    ):
+        with pytest.raises(ApiError):
+            validate_remote_dir(bad)
+
+
+def test_folder_remote_deletion_applies_cleanly(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    clone = clone_remote(remote, tmp_path / "delete-one-clone")
+    (clone / "kb" / "第二文库" / "01-进阶.md").unlink()
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "remote delete file", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+    result = service.sync("pull")
+    assert result["conflictsResolved"] == 0
+    assert not (root / "第二文库" / "01-进阶.md").exists()
+    assert (root / "第一文库" / "01-基础.md").is_file()
+    assert service.status()["conflicts"] == []
+
+    clone2 = clone_remote(remote, tmp_path / "delete-folder-clone")
+    shutil.rmtree(clone2 / "kb")
+    git("add", "-A", cwd=clone2)
+    git("commit", "-m", "remote delete folder", cwd=clone2)
+    git("push", "origin", "main", cwd=clone2)
+
+    result = service.sync("pull")
+    assert "删除" in result["message"]
+    assert not (root / "第一文库").exists()
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["dirty"] is False
+
+    recreated = service.sync("push")
+    assert recreated["ok"] is True
+
+
+def test_folder_repeat_sync_does_not_create_commits(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    before = clone_remote(remote, tmp_path / "count-before")
+    count_before = int(git("rev-list", "--count", "HEAD", cwd=before).stdout.strip())
+    service.sync("sync")
+    service.sync("push")
+    after = clone_remote(remote, tmp_path / "count-after")
+    assert int(git("rev-list", "--count", "HEAD", cwd=after).stdout.strip()) == count_before
+    assert service.status()["dirty"] is False
+    assert service.status()["ahead"] == 0
+    assert service.status()["behind"] == 0
+
+
+def test_folder_remote_switch_keeps_local_library(tmp_path: Path):
+    root, remote_a = make_library(tmp_path)
+    remote_b = make_remote(tmp_path / "remote-b.git")
+    seed_remote(remote_b, tmp_path, {"README.md": "b\n"})
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote_a))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    service.set_remote(str(remote_b))
+    pulled = service.sync("pull")
+    assert pulled["pulled"] is False
+    assert (root / "第一文库" / "01-基础.md").is_file()
+    assert service.status()["kbCount"] == 2
+
+    service.sync("push")
+    clone = clone_remote(remote_b, tmp_path / "switch-b")
+    assert (clone / "kb" / "第一文库" / "01-基础.md").is_file()
+    assert (clone / "README.md").is_file()
+
+
+def test_folder_existing_remote_folder_requires_pull(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    seed_remote(remote, tmp_path, {"kb/legacy.md": "legacy\n"})
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+
+    with pytest.raises(ApiError) as info:
+        service.sync("push")
+    assert info.value.code == "git_pull_required"
+
+    pulled = service.sync("pull")
+    assert pulled["pulled"] is True
+    assert (root / "legacy.md").is_file()
+
+    service.sync("push")
+    clone = clone_remote(remote, tmp_path / "after-import")
+    assert (clone / "kb" / "legacy.md").is_file()
+    assert (clone / "kb" / "第一文库" / "01-基础.md").is_file()
+
+
+def test_folder_manual_resolution_outside_app_recovers(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    edit_remote_file(remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端内容\n")
+    local = root / "第一文库" / "01-基础.md"
+    local.write_text("# 01 · 基础\n\n本地内容\n", encoding="utf-8")
+    with pytest.raises(ApiError):
+        service.sync("pull", strategy="manual")
+
+    local.write_text("# 01 · 基础\n\n手工解决\n", encoding="utf-8")
+    git("add", "-A", cwd=root)
+    git("commit", "-m", "resolve manually", cwd=root)
+
+    result = service.sync("pull")
+    assert result["pulled"] is False
+    assert service.status()["conflicts"] == []
+    service.sync("sync")
+    clone = clone_remote(remote, tmp_path / "manual-outside")
+    assert "手工解决" in (clone / "kb" / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+
+
+def test_folder_both_sides_delete_same_file(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    clone = clone_remote(remote, tmp_path / "both-delete")
+    (clone / "kb" / "第二文库" / "01-进阶.md").unlink()
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "remote delete", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+    (root / "第二文库" / "01-进阶.md").unlink()
+
+    result = service.sync("sync")
+    assert result["ok"] is True
+    assert not (root / "第二文库" / "01-进阶.md").exists()
+    assert service.status()["conflicts"] == []
+
+
+def test_folder_rejects_remote_file_at_ancestor_path(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    seed_remote(remote, tmp_path, {"notes": "i am a file\n"})
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "notes/kb"})
+
+    with pytest.raises(ApiError) as info:
+        service.sync("push")
+    assert info.value.code == "git_path_conflict"
+    clone = clone_remote(remote, tmp_path / "ancestor-check")
+    assert (clone / "notes").read_text(encoding="utf-8") == "i am a file\n"
+
+
+def test_folder_pull_on_detached_head(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+    edit_remote_file(remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端内容\n")
+
+    git("checkout", "--detach", cwd=root)
+    result = service.sync("pull")
+    assert result["pulled"] is True
+    assert "远端内容" in (root / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+    assert service.status()["dirty"] is False
+
+
+def test_folder_settings_hand_edited_value_is_normalized(tmp_path: Path):
+    root, _ = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo()
+    service.config.patch_git_state({"remoteDir": "  kb/  "})
+    assert service.settings()["remoteDir"] == "kb"
+    service.config.patch_git_state({"remoteDir": "../escape"})
+    settings = service.settings()
+    assert settings["remoteDir"] == ""
+    assert settings["remoteDirError"]
+    assert service.status()["remoteDirError"]
+    with pytest.raises(ApiError) as info:
+        service.sync("pull")
+    assert info.value.code == "git_settings_invalid"
+
+
+def test_folder_replaced_remote_history_requires_reset(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    shutil.rmtree(remote)
+    make_remote(remote)
+    seed_remote(remote, tmp_path, {"README.md": "new repo\n"})
+
+    with pytest.raises(ApiError) as info:
+        service.sync("pull")
+    assert info.value.code == "git_remote_rewritten"
+    assert (root / "第一文库" / "01-基础.md").is_file()
+    assert service.status()["kbCount"] == 2
+
+    service.set_remote(str(remote))
+    pushed = service.sync("push")
+    assert pushed["ok"] is True
+    clone = clone_remote(remote, tmp_path / "reset-check")
+    assert (clone / "kb" / "第一文库" / "01-基础.md").is_file()
+    assert (clone / "README.md").is_file()
+
+
+def test_folder_pull_does_not_advance_ahead(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    target = root / "第一文库" / "01-基础.md"
+    target.write_text("# 01 · 基础\n\n本地未推送\n", encoding="utf-8")
+    service.sync("pull")
+    status = service.status()
+    assert status["dirty"] is False
+    assert status["ahead"] == 1
+    assert status["behind"] == 0
+
+    service.sync("push")
+    assert service.status()["ahead"] == 0
+
+
+def test_folder_status_tracks_behind(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+    assert service.status()["behind"] == 0
+
+    edit_remote_file(remote, tmp_path, "kb/第二文库/01-进阶.md", "# 01 · 进阶\n\n远端新内容\n")
+    service._run(["fetch", "origin", "--prune"], root, timeout=60)
+    assert service.status()["behind"] >= 1
+
+    service.sync("pull")
+    assert service.status()["behind"] == 0
+
+
+def test_folder_empty_pull_reuses_snapshot_ref(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    base_ref, _, _ = service._folder_refs("main", "kb", str(remote))
+    before = service._rev(root, base_ref)
+    for _ in range(3):
+        service.sync("pull")
+    assert service._rev(root, base_ref) == before
+
+
+def test_folder_sync_fetches_once(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    original = service._run
+    fetch_calls: list[list[str]] = []
+
+    def counted(args, *rest, **kwargs):
+        if list(args[:2]) == ["fetch", "origin"]:
+            fetch_calls.append(list(args))
+        return original(args, *rest, **kwargs)
+
+    service._run = counted  # type: ignore[method-assign]
+    service.sync("sync")
+    assert len(fetch_calls) == 1
+
+
+def test_folder_pull_handles_unborn_head(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    git("init", "--initial-branch=main", cwd=root)
+    remote = make_remote(tmp_path / "remote.git")
+    seed_remote(remote, tmp_path, {"kb/remote.md": "# remote\n"})
+    git("remote", "add", "origin", str(remote), cwd=root)
+
+    config = ConfigStore(tmp_path / "config", tmp_path / "data")
+    config.update({"kb": {"root": str(root)}})
+    service = GitService(config)
+    service.update_settings({"remoteDir": "kb"})
+
+    result = service.sync("pull")
+    assert result["pulled"] is True
+    assert (root / "remote.md").read_text(encoding="utf-8") == "# remote\n"
+    assert service.status()["dirty"] is False
+
+
+def test_folder_remote_dir_rename_and_clear_setting(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb-a"})
+    service.sync("push")
+    service.update_settings({"remoteDir": "kb-b"})
+    service.sync("push")
+
+    clone = clone_remote(remote, tmp_path / "renamed")
+    assert (clone / "kb-a" / "第一文库" / "01-基础.md").is_file()
+    assert (clone / "kb-b" / "第一文库" / "01-基础.md").is_file()
+
+    service.update_settings({"remoteDir": ""})
+    status = service.status()
+    assert status["folderMode"] is False
+    assert status["remoteDir"] == ""
+    assert (root / "第一文库" / "01-基础.md").is_file()
+
+
+def test_folder_custom_push_command_overrides_mapping(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings(
+        {"remoteDir": "kb", "pushCommand": "git push origin {branch}"}
+    )
+    target = root / "第一文库" / "01-基础.md"
+    target.write_text("# 01 · 基础\n\n自定义推送\n", encoding="utf-8")
+    service.sync("push")
+
+    clone = clone_remote(remote, tmp_path / "custom")
+    assert (clone / "第一文库" / "01-基础.md").is_file()
+    assert not (clone / "kb").exists()
+    parts = service._command_parts("git push origin {dir}/x", "main", str(remote), root, "kb")
+    assert parts == ["git", "push", "origin", "kb/x"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges on Windows")
+def test_folder_type_change_applies(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    clone = clone_remote(remote, tmp_path / "type-change")
+    target = clone / "kb" / "第一文库" / "01-基础.md"
+    target.unlink()
+    os.symlink("target-file", target)
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "replace file with symlink", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+    result = service.sync("pull")
+    assert result["conflictsResolved"] == 0
+    local = root / "第一文库" / "01-基础.md"
+    assert local.is_symlink()
+    assert os.readlink(local) == "target-file"
+    assert service.status()["dirty"] is False

@@ -32,6 +32,7 @@ class GitSettingsRequest(BaseModel):
     intervalMinutes: int | None = None
     autoDirection: Literal["sync", "pull", "push"] | None = None
     strategy: Literal["abort", "local", "remote", "manual"] | None = None
+    remoteDir: str | None = None
     pushCommand: str | None = None
     pullCommand: str | None = None
 
