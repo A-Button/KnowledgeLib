@@ -13,7 +13,16 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not 
 
 def git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        [
+            "git",
+            "-c",
+            "user.name=KnowledgeLib Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
         cwd=str(cwd) if cwd else None,
         check=True,
         capture_output=True,
@@ -156,3 +165,26 @@ async def test_git_api_remote_dir_setting(client):
         rejected = await client.put("/api/git/settings", json={"remoteDir": bad})
         assert rejected.status_code == 400, bad
         assert rejected.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_git_api_rejects_unsafe_remote_dirs(client):
+    for bad in ("CON", "../x"):
+        rejected = await client.put("/api/git/settings", json={"remoteDir": bad})
+        assert rejected.status_code == 400, bad
+        assert rejected.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_git_api_exposes_mode_switch_warning(client):
+    payload = (await client.get("/api/git")).json()
+    assert "modeSwitchWarning" in payload
+    assert payload["modeSwitchWarning"] == ""
+
+    client.app.state.kl.config.patch_git_state({"remoteDir": "../escape"})
+    invalid = (await client.get("/api/git")).json()
+    assert invalid["remoteDirError"]
+    assert invalid["modeSwitchWarning"] == ""
+    blocked = await client.post("/api/git/sync", json={"direction": "pull"})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "git_settings_invalid"

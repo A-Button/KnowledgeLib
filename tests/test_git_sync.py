@@ -25,10 +25,29 @@ from server.git_sync import (
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 
 
-def git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+# Test helpers create throwaway repositories with raw `git commit`. Pass the
+# identity and signing overrides explicitly so the suite never depends on the
+# developer's global git config (a global commit.gpgsign=true would otherwise
+# turn every helper commit into a hard failure).
+_GIT_TEST_CONFIG = (
+    "-c",
+    "user.name=KnowledgeLib Test",
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "commit.gpgsign=false",
+)
+
+
+def git(
+    *args: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        ["git", *_GIT_TEST_CONFIG, *args],
         cwd=str(cwd) if cwd else None,
+        env=env,
         check=True,
         capture_output=True,
         text=True,
@@ -100,6 +119,37 @@ def edit_remote_file(remote: Path, tmp_path: Path, relative: str, text: str) -> 
     target.write_text(text, encoding="utf-8")
     git("add", "-A", cwd=clone)
     git("commit", "-m", "remote folder edit", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+
+def replace_remote_directory_with_file(
+    remote: Path, tmp_path: Path, relative: str, text: str
+) -> None:
+    clone = tmp_path / "df-remote-clone"
+    if clone.exists():
+        shutil.rmtree(clone)
+    clone_remote(remote, clone)
+    target = clone / relative
+    shutil.rmtree(target)
+    target.write_text(text, encoding="utf-8")
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "replace remote directory with file", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+
+def replace_remote_file_with_directory(
+    remote: Path, tmp_path: Path, relative: str, child: str, text: str
+) -> None:
+    clone = tmp_path / "fd-remote-clone"
+    if clone.exists():
+        shutil.rmtree(clone)
+    clone_remote(remote, clone)
+    target = clone / relative
+    target.unlink()
+    target.mkdir()
+    (target / child).write_text(text, encoding="utf-8")
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "replace remote file with directory", cwd=clone)
     git("push", "origin", "main", cwd=clone)
 
 
@@ -702,6 +752,7 @@ def test_folder_empty_pull_reuses_snapshot_ref(tmp_path: Path):
 
     base_ref, _, _ = service._folder_refs("main", "kb", str(remote))
     before = service._rev(root, base_ref)
+    assert before
     for _ in range(3):
         service.sync("pull")
     assert service._rev(root, base_ref) == before
@@ -806,3 +857,338 @@ def test_folder_type_change_applies(tmp_path: Path):
     assert local.is_symlink()
     assert os.readlink(local) == "target-file"
     assert service.status()["dirty"] is False
+
+
+@pytest.mark.parametrize("strategy", ["abort", "local", "remote", "manual"])
+def test_folder_pull_rejects_remote_directory_replaced_by_file(
+    tmp_path: Path, strategy: str
+):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    kb_dir = root / "第一文库"
+    document = next(kb_dir.glob("01-*.md"))
+    before_head = git("rev-parse", "HEAD", cwd=root).stdout.strip()
+    before_text = document.read_text(encoding="utf-8")
+    replace_remote_directory_with_file(remote, tmp_path, "kb/第一文库", "remote file\n")
+
+    with pytest.raises(ApiError) as failure:
+        service.sync("pull", strategy=strategy)
+    assert failure.value.code == "git_conflict"
+    details = failure.value.details or {}
+    assert details.get("reason") == "path_type"
+    assert set(details.get("conflicts") or []) == {"第一文库"}
+
+    assert (kb_dir / ".kb.json").is_file()
+    assert document.read_text(encoding="utf-8") == before_text
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+    assert status["dirty"] is False
+    assert git("rev-parse", "HEAD", cwd=root).stdout.strip() == before_head
+
+
+@pytest.mark.parametrize("strategy", ["abort", "local", "remote", "manual"])
+def test_folder_pull_rejects_remote_file_replaced_by_directory(
+    tmp_path: Path, strategy: str
+):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    note = root / "第一文库" / "notes.txt"
+    note.write_text("local note\n", encoding="utf-8")
+    service.sync("push")
+    before_head = git("rev-parse", "HEAD", cwd=root).stdout.strip()
+    replace_remote_file_with_directory(
+        remote, tmp_path, "kb/第一文库/notes.txt", "child.md", "# child\n"
+    )
+
+    with pytest.raises(ApiError) as failure:
+        service.sync("pull", strategy=strategy)
+    assert failure.value.code == "git_conflict"
+    details = failure.value.details or {}
+    assert details.get("reason") == "path_type"
+    assert set(details.get("conflicts") or []) == {"第一文库/notes.txt"}
+
+    assert note.is_file()
+    assert note.read_text(encoding="utf-8") == "local note\n"
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+    assert git("rev-parse", "HEAD", cwd=root).stdout.strip() == before_head
+
+
+def test_folder_pull_path_type_conflict_keeps_local_edits(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    kb_dir = root / "第一文库"
+    document = next(kb_dir.glob("01-*.md"))
+    document.write_text("# 01 · 基础\n\n本地修改不能丢\n", encoding="utf-8")
+    replace_remote_directory_with_file(remote, tmp_path, "kb/第一文库", "remote file\n")
+
+    with pytest.raises(ApiError) as failure:
+        service.sync("pull", strategy="local")
+    assert failure.value.code == "git_conflict"
+    details = failure.value.details or {}
+    assert details.get("reason") == "path_type"
+
+    assert (kb_dir / ".kb.json").is_file()
+    assert document.is_file()
+    assert "本地修改不能丢" in document.read_text(encoding="utf-8")
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+
+
+def test_folder_clear_remote_dir_requires_remote_reset(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    service.update_settings({"remoteDir": ""})
+    assert service.status().get("modeSwitchWarning")
+    with pytest.raises(ApiError) as blocked:
+        service.sync("pull")
+    assert blocked.value.code == "git_mode_switch"
+    with pytest.raises(ApiError) as blocked_push:
+        service.sync("push")
+    assert blocked_push.value.code == "git_mode_switch"
+
+    service.set_remote(str(remote))
+    assert not service.status().get("modeSwitchWarning")
+    result = service.sync("pull")
+    assert result["ok"] is True
+
+
+def test_folder_remote_branch_deleted_is_treated_as_rewrite(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+    tips = git("for-each-ref", "--format=%(refname)", "refs/kl/tip", cwd=root).stdout.strip()
+    assert tips
+    git("branch", "-D", "main", cwd=remote)
+
+    kb_dir = root / "第一文库"
+    document = next(kb_dir.glob("01-*.md"))
+    with pytest.raises(ApiError) as pushed:
+        service.sync("push")
+    assert pushed.value.code == "git_remote_rewritten"
+    with pytest.raises(ApiError) as pulled:
+        service.sync("pull")
+    assert pulled.value.code == "git_remote_rewritten"
+    assert (kb_dir / ".kb.json").is_file()
+    assert document.is_file()
+
+    service.set_remote(str(remote))
+    result = service.sync("push")
+    assert result["ok"] is True
+    clone = clone_remote(remote, tmp_path / "branch-recreated")
+    assert (clone / "kb" / "第一文库" / document.name).is_file()
+
+
+def test_folder_remote_dir_change_clears_snapshots(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb-a"})
+    service.sync("push")
+    assert git("for-each-ref", "--format=%(refname)", "refs/kl", cwd=root).stdout.strip()
+
+    service.update_settings({"remoteDir": "kb-b"})
+    assert git("for-each-ref", "--format=%(refname)", "refs/kl", cwd=root).stdout.strip() == ""
+    assert service.sync("push")["ok"] is True
+
+    service.update_settings({"remoteDir": "kb-a"})
+    with pytest.raises(ApiError) as required:
+        service.sync("push")
+    assert required.value.code == "git_pull_required"
+
+
+def test_folder_remote_dir_snapshot_reset_edges(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    def snapshot_refs() -> str:
+        return git("for-each-ref", "--format=%(refname)", "refs/kl", cwd=root).stdout.strip()
+
+    assert snapshot_refs()
+    service.update_settings({"autoSync": True})
+    assert snapshot_refs()
+    service.update_settings({"remoteDir": ""})
+    assert snapshot_refs()
+    service.update_settings({"remoteDir": "kb"})
+    assert snapshot_refs() == ""
+    with pytest.raises(ApiError) as required:
+        service.sync("push")
+    assert required.value.code == "git_pull_required"
+
+
+def test_folder_invalid_hand_edited_remote_dir_suppresses_mode_switch_warning(
+    tmp_path: Path,
+):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    service.config.patch_git_state({"remoteDir": "../escape"})
+    status = service.status()
+    assert status["remoteDirError"]
+    assert "modeSwitchWarning" in status
+    assert status["modeSwitchWarning"] == ""
+    with pytest.raises(ApiError) as blocked:
+        service.sync("pull")
+    assert blocked.value.code == "git_settings_invalid"
+
+
+def test_remote_dir_rejects_windows_reserved_names_and_segment_whitespace():
+    reserved = ["CON", "PRN", "AUX", "NUL"]
+    reserved += [f"COM{index}" for index in range(1, 10)]
+    reserved += [f"LPT{index}" for index in range(1, 10)]
+    for bad in (*reserved, "con.txt", "com1.txt", "a /b", "a/ b"):
+        with pytest.raises(ApiError) as info:
+            validate_remote_dir(bad)
+        assert info.value.code == "invalid_request"
+    assert validate_remote_dir(" a/ ") == "a"
+    assert validate_remote_dir("notes\\kb") == "notes/kb"
+
+
+def test_root_pull_merge_ignores_global_gpgsign(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    config = ConfigStore(tmp_path / "config", tmp_path / "data")
+    config.update({"kb": {"root": str(root)}})
+    service = GitService(
+        config,
+        environ={
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "commit.gpgsign",
+            "GIT_CONFIG_VALUE_0": "true",
+        },
+    )
+    service.init_repo(str(remote))
+    service.sync("push")
+    remote_edit(remote, tmp_path, "01-基础.md", "远端签名测试")
+
+    local = next((root / "第二文库").glob("*.md"))
+    local.write_text("# 01 · 进阶\n\n本地待合并\n", encoding="utf-8")
+
+    try:
+        result = service.sync("pull")
+    except ApiError as exc:
+        raise AssertionError(
+            f"根目录模式拉取不应受 commit.gpgsign=true 影响，实际失败：{exc.code}: {exc.message}"
+        ) from exc
+    assert result["ok"] is True
+    assert result["pulled"] is True
+    assert "远端签名测试" in (root / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+    assert "本地待合并" in local.read_text(encoding="utf-8")
+    merge_parents = git("rev-list", "--parents", "-n", "1", "HEAD", cwd=root).stdout.split()
+    assert len(merge_parents) == 3
+    assert "gpgsig" not in git("cat-file", "commit", "HEAD", cwd=root).stdout
+
+
+def test_folder_sync_without_global_git_identity(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    missing_config = str(tmp_path / "missing-gitconfig")
+    config = ConfigStore(tmp_path / "config", tmp_path / "data")
+    config.update({"kb": {"root": str(root)}})
+    service = GitService(
+        config,
+        environ={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "GIT_CONFIG_GLOBAL": missing_config,
+            "GIT_CONFIG_SYSTEM": missing_config,
+        },
+    )
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    edit_remote_file(
+        remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n干净环境\n"
+    )
+    result = service.sync("pull")
+    assert result["ok"] is True
+    assert "干净环境" in (root / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+
+    # The raw `git()` helper must not lean on the user's global identity either:
+    # commit in a clean environment and check the explicit test identity wins.
+    clean_env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "GIT_CONFIG_GLOBAL": missing_config,
+        "GIT_CONFIG_SYSTEM": missing_config,
+    }
+    helper_repo = tmp_path / "helper-repo"
+    git("init", "-q", "--initial-branch=main", str(helper_repo), env=clean_env)
+    (helper_repo / "note.txt").write_text("identity\n", encoding="utf-8")
+    git("add", "-A", cwd=helper_repo, env=clean_env)
+    git("commit", "-m", "helper identity", cwd=helper_repo, env=clean_env)
+    author = git("log", "-1", "--format=%an <%ae>", cwd=helper_repo, env=clean_env)
+    assert author.stdout.strip() == "KnowledgeLib Test <test@example.com>"
+
+
+def test_folder_conflict_remote_deletion_removes_modified_file(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    local = root / "第一文库" / "01-基础.md"
+    local.write_text("# 01 · 基础\n\n本地改动\n", encoding="utf-8")
+
+    clone = clone_remote(remote, tmp_path / "remote-delete-file")
+    (clone / "kb" / "第一文库" / "01-基础.md").unlink()
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "remote delete file", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+    result = service.sync("pull", strategy="remote")
+    assert result["ok"] is True
+    assert not local.exists()
+    assert (root / "第一文库" / ".kb.json").is_file()
+    assert service.status()["conflicts"] == []
+
+
+def test_folder_conflict_local_deletion_keeps_remote_change_deleted(tmp_path: Path):
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    local = root / "第一文库" / "01-基础.md"
+    local.unlink()
+    edit_remote_file(
+        remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端改动\n"
+    )
+
+    result = service.sync("pull", strategy="local")
+    assert result["ok"] is True
+    assert not local.exists()
+    assert (root / "第一文库" / ".kb.json").is_file()
+    assert service.status()["conflicts"] == []

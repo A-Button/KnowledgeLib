@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import httpx
@@ -12,12 +11,6 @@ import pytest_asyncio
 from server.main import create_app
 from tests.mock_upstream import create_mock_app
 from tests.support import configure_payload, reset_mock, serve
-
-# Test helpers create throwaway repositories with raw `git commit`. A user-level
-# commit.gpgsign=true must not turn those commits into hard failures.
-os.environ["GIT_CONFIG_COUNT"] = "1"
-os.environ["GIT_CONFIG_KEY_0"] = "commit.gpgsign"
-os.environ["GIT_CONFIG_VALUE_0"] = "false"
 
 
 @pytest.fixture(scope="session")
