@@ -60,8 +60,9 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"lpt{index}" for index in range(1, 10)}
 )
 _MODE_SWITCH_WARNING = (
-    "检测到「仓库内目录」同步快照，但当前为仓库根目录模式；切换会把整个远端仓库合并进知识库。\n"
-    "请先清理远端旧目录，再重新保存 remote 重置快照；"
+    "曾使用「仓库内目录」模式同步（或仍存在同步快照），但当前为仓库根目录模式；"
+    "切换会把整个远端仓库合并进知识库。\n"
+    "请先清理远端旧目录，再重新保存 remote 重置同步状态；"
     "或重新填写「仓库内目录」并先执行一次「拉取」导入。"
 )
 _REMOTE_BRANCH_GONE = "远端分支已消失（可能被删除或仓库被重建）；请重新保存 remote 重置同步快照"
@@ -635,7 +636,7 @@ class GitService:
             # Folder mode is remembered even after its refs/kl snapshots were
             # cleared: root mode would merge the whole remote repository into
             # the library root, so a stale folder history must keep blocking.
-            if bool(settings.get("folderSyncUsed")):
+            if settings.get("folderSyncUsed") is True:
                 mode_switch_warning = _MODE_SWITCH_WARNING
             else:
                 try:
@@ -840,6 +841,11 @@ class GitService:
             code, out, err = self._run(["remote", "add", "origin", remote], root, timeout=20)
             if code != 0:
                 raise ApiError(502, "git_remote_failed", f"添加 remote 失败：{_tail(err or out)}")
+            # A brand-new repository has no folder-mode history at all, so a
+            # stale marker (for example after the repository was deleted and
+            # reinitialized) must not block root-mode sync. Existing
+            # repositories go through `set_remote`, which clears it as well.
+            self.config.patch_git_state({"folderSyncUsed": False})
         self._commit_all(root, "Initialize KnowledgeLib library")
         return self.status()
 
@@ -926,7 +932,7 @@ class GitService:
             # back to root mode) but folder mode was definitely used before.
             self.config.patch_git_state({"folderSyncUsed": True})
         if not remote_dir and (
-            self._has_folder_refs(kb_dir) or bool(settings.get("folderSyncUsed"))
+            self._has_folder_refs(kb_dir) or settings.get("folderSyncUsed") is True
         ):
             # Root mode would merge the whole remote repository (including the
             # old library folder) into the library; refuse instead.
@@ -995,15 +1001,41 @@ class GitService:
             "message": "；".join(summary),
         }
 
-    def _abort_merge(self, kb_dir: Path) -> None:
+    def _abort_merge(self, kb_dir: Path) -> bool:
+        """Restore the pre-merge state; report whether a merge was in progress.
+
+        Returns True when the repository was actually mid-merge (and the abort
+        ran), False when there was nothing to abort.
+        """
         try:
             git_dir = self._git_dir(kb_dir)
         except ApiError:
-            return
+            return False
         if (git_dir / "MERGE_HEAD").exists():
             self._run(["merge", "--abort"], kb_dir, timeout=60)
-        elif (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+            return True
+        if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
             self._run(["rebase", "--abort"], kb_dir, timeout=60)
+            return True
+        return False
+
+    def _abort_refused_merge(self, kb_dir: Path) -> None:
+        """Clean up before refusing a merge with an unrecoverable D/F conflict.
+
+        The D/F refusals in `_resolve_conflicts` happen after `MERGE_HEAD` was
+        written (folder pull) or after `git merge` ran (root pull). Raising
+        there would leave an unfinished merge behind: `status()` would report
+        `mergeInProgress`/`dirty`/`conflicts`, and the recommended "just push"
+        recovery would be blocked by the unresolved-conflict check. HEAD still
+        contains the local content because sync auto-commits before merging, so
+        aborting only rolls the merge attempt back. When there is no merge to
+        abort, reset the index and working tree to HEAD as a fallback so the
+        refusal always leaves a clean repository.
+        """
+        pending = self._merge_in_progress(kb_dir)
+        self._abort_merge(kb_dir)
+        if not pending or self._merge_in_progress(kb_dir) or self._conflicts(kb_dir):
+            self._run(["read-tree", "--reset", "-u", "HEAD"], kb_dir, timeout=60)
 
     def _resolve_conflicts(self, kb_dir: Path, strategy: str) -> int:
         side = "ours" if strategy == "local" else "theirs"
@@ -1026,6 +1058,9 @@ class GitService:
             ]
             if remote_files:
                 shown = "、".join(remote_files[:3])
+                # Leave a clean repository: the refusal is terminal for this
+                # attempt, and `mergeInProgress` would block the suggested push.
+                self._abort_refused_merge(kb_dir)
                 raise ApiError(
                     409,
                     "git_conflict",
@@ -1065,6 +1100,7 @@ class GitService:
                 # would not even be restored. Refuse instead of silently
                 # dropping local content; this is the fallback for a D/F
                 # precheck that was skipped or missed the clash.
+                self._abort_refused_merge(kb_dir)
                 raise ApiError(
                     409,
                     "git_conflict",
@@ -1383,15 +1419,22 @@ class GitService:
             self._discard_index(index_path)
 
     def _unset_upstream(self, kb_dir: Path, branch: str) -> None:
-        """Drop the branch upstream that root mode left behind via `push -u`.
+        """Drop a root-mode `origin/` upstream left behind by `push -u`.
 
         Folder mode never pushes the local branch: it builds a synthetic commit
         from the remote tree and pushes that, so a leftover upstream would make
         a bare `git push` in the library directory send local `main` (root
         layout) over the remote branch and silently overwrite the folder
-        layout. Removing the upstream makes such accidental pushes fail. The
-        command is best-effort: the branch may have no upstream configured.
+        layout. Removing the upstream makes such accidental pushes fail.
+
+        Only an upstream that root mode could have created (`origin/...`) is
+        dropped. A branch that tracks something else (for example `other/main`)
+        was configured deliberately by the user and must be preserved. The
+        command is best-effort: the branch may have no upstream at all.
         """
+        upstream = self._upstream(kb_dir)
+        if upstream and not upstream.startswith("origin/"):
+            return
         self._run(["branch", "--unset-upstream", branch], kb_dir, timeout=15)
 
     def _pull_folder(
@@ -1402,7 +1445,6 @@ class GitService:
         remote_url: str,
         remote_dir: str,
     ) -> dict[str, Any]:
-        self._unset_upstream(kb_dir, branch)
         code, out, err = self._run(["fetch", "origin", "--prune"], kb_dir, timeout=180)
         if code != 0:
             raise self._remote_error("git_fetch_failed", "拉取远端失败", out, err, remote_url)
@@ -1597,7 +1639,6 @@ class GitService:
         remote_dir: str,
         skip_fetch: bool = False,
     ) -> dict[str, Any]:
-        self._unset_upstream(kb_dir, branch)
         self._ensure_identity(kb_dir)
         if not skip_fetch:
             code, out, err = self._run(["fetch", "origin", "--prune"], kb_dir, timeout=180)
@@ -1687,6 +1728,10 @@ class GitService:
         settings: Mapping[str, Any],
         remote_dir: str = "",
     ) -> dict[str, Any]:
+        if remote_dir:
+            # Folder mode must not keep a root-mode upstream, no matter whether
+            # the built-in folder pull or a custom pull command runs below.
+            self._unset_upstream(kb_dir, branch)
         custom = (settings.get("pullCommand") or "").strip()
         if custom:
             parts = self._command_parts(custom, branch, remote_url, kb_dir, remote_dir)
@@ -1780,6 +1825,10 @@ class GitService:
         remote_dir: str = "",
         skip_fetch: bool = False,
     ) -> dict[str, Any]:
+        if remote_dir:
+            # See _pull(): a custom push command must not keep a root-mode
+            # upstream either.
+            self._unset_upstream(kb_dir, branch)
         custom = (settings.get("pushCommand") or "").strip()
         if custom:
             parts = self._command_parts(custom, branch, remote_url, kb_dir, remote_dir)
