@@ -1574,6 +1574,17 @@ def test_folder_pull_preserves_custom_upstream(tmp_path: Path):
     ref = git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=root).stdout.strip()
     assert ref == "other/main"
 
+    # A user-configured `origin/<other-branch>` upstream is deliberate too: only
+    # the exact `origin/<current-branch>` root mode creates may be removed.
+    git("push", "origin", "HEAD:refs/heads/feature", cwd=root)
+    git("fetch", "origin", cwd=root)
+    git("branch", "--set-upstream-to=origin/feature", "main", cwd=root)
+    edit_remote_file(
+        remote, tmp_path, "kb/第二文库/01-进阶.md", "# 01 · 进阶\n\n远端再一次\n"
+    )
+    service.sync("pull")
+    assert service._upstream(root) == "origin/feature", "origin/feature 不应被解除"
+
 
 def test_folder_custom_pull_command_clears_origin_upstream(tmp_path: Path):
     """A custom pull command must still drop the `origin/*` upstream.
@@ -1617,6 +1628,9 @@ def test_init_fresh_repo_clears_folder_marker(tmp_path: Path):
     service.init_repo(str(remote))
 
     assert service.settings().get("folderSyncUsed") is False, "全新初始化应清除目录模式标记"
+    # Enter root mode explicitly, otherwise the warning/guard checks below are
+    # vacuous (both are only computed when `remoteDir` is empty).
+    service.update_settings({"remoteDir": ""})
     status = service.status()
     assert status["modeSwitchWarning"] == ""
     try:

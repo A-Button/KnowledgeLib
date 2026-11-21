@@ -841,11 +841,11 @@ class GitService:
             code, out, err = self._run(["remote", "add", "origin", remote], root, timeout=20)
             if code != 0:
                 raise ApiError(502, "git_remote_failed", f"添加 remote 失败：{_tail(err or out)}")
-            # A brand-new repository has no folder-mode history at all, so a
-            # stale marker (for example after the repository was deleted and
-            # reinitialized) must not block root-mode sync. Existing
-            # repositories go through `set_remote`, which clears it as well.
-            self.config.patch_git_state({"folderSyncUsed": False})
+        # A brand-new repository has no folder-mode history at all, so a stale
+        # marker (for example after the repository was deleted and
+        # reinitialized) must not block root-mode sync. Existing repositories
+        # go through `set_remote`, which clears it as well.
+        self.config.patch_git_state({"folderSyncUsed": False})
         self._commit_all(root, "Initialize KnowledgeLib library")
         return self.status()
 
@@ -1019,7 +1019,7 @@ class GitService:
             return True
         return False
 
-    def _abort_refused_merge(self, kb_dir: Path) -> None:
+    def _abort_refused_merge(self, kb_dir: Path, allow_force_reset: bool = False) -> None:
         """Clean up before refusing a merge with an unrecoverable D/F conflict.
 
         The D/F refusals in `_resolve_conflicts` happen after `MERGE_HEAD` was
@@ -1033,11 +1033,26 @@ class GitService:
         refusal always leaves a clean repository.
         """
         pending = self._merge_in_progress(kb_dir)
-        self._abort_merge(kb_dir)
-        if not pending or self._merge_in_progress(kb_dir) or self._conflicts(kb_dir):
+        aborted = self._abort_merge(kb_dir)
+        if allow_force_reset and (
+            not pending or not aborted or self._merge_in_progress(kb_dir) or self._conflicts(kb_dir)
+        ):
+            # Only safe when the caller has already auto-committed: resetting
+            # the index and worktree to HEAD then just rolls the merge attempt
+            # back. `_sync_locked` resolves pre-existing conflicts *before* the
+            # auto-commit, so that path must never force a reset or it would
+            # overwrite the user's uncommitted edits.
             self._run(["read-tree", "--reset", "-u", "HEAD"], kb_dir, timeout=60)
+        if allow_force_reset:
+            for name in ("MERGE_HEAD", "MERGE_MSG"):
+                try:
+                    self._git_path(kb_dir, name).unlink()
+                except OSError:
+                    pass
 
-    def _resolve_conflicts(self, kb_dir: Path, strategy: str) -> int:
+    def _resolve_conflicts(
+        self, kb_dir: Path, strategy: str, allow_force_reset: bool = False
+    ) -> int:
         side = "ours" if strategy == "local" else "theirs"
         selected_stage = 2 if strategy == "local" else 3
         conflicts = self._conflicts(kb_dir)
@@ -1060,7 +1075,7 @@ class GitService:
                 shown = "、".join(remote_files[:3])
                 # Leave a clean repository: the refusal is terminal for this
                 # attempt, and `mergeInProgress` would block the suggested push.
-                self._abort_refused_merge(kb_dir)
+                self._abort_refused_merge(kb_dir, allow_force_reset)
                 raise ApiError(
                     409,
                     "git_conflict",
@@ -1100,7 +1115,7 @@ class GitService:
                 # would not even be restored. Refuse instead of silently
                 # dropping local content; this is the fallback for a D/F
                 # precheck that was skipped or missed the clash.
-                self._abort_refused_merge(kb_dir)
+                self._abort_refused_merge(kb_dir, allow_force_reset)
                 raise ApiError(
                     409,
                     "git_conflict",
@@ -1433,7 +1448,10 @@ class GitService:
         command is best-effort: the branch may have no upstream at all.
         """
         upstream = self._upstream(kb_dir)
-        if upstream and not upstream.startswith("origin/"):
+        if upstream and upstream != f"origin/{branch}":
+            # `origin/feature` or a foreign remote set by the user is
+            # deliberate; only the exact origin/<branch> upstream root mode
+            # creates through `push -u` is ours to remove.
             return
         self._run(["branch", "--unset-upstream", branch], kb_dir, timeout=15)
 
@@ -1581,7 +1599,7 @@ class GitService:
                     f"拉取 {remote_dir}/ 产生冲突，请手工处理后再次同步",
                     {"conflicts": conflicts},
                 )
-            resolved = self._resolve_conflicts(kb_dir, strategy)
+            resolved = self._resolve_conflicts(kb_dir, strategy, allow_force_reset=True)
             pulled = True
         else:
             code, out, err = self._run(["write-tree"], kb_dir, timeout=30)
@@ -1753,7 +1771,7 @@ class GitService:
                         "自定义拉取产生冲突，请手工处理",
                         {"conflicts": conflicts},
                     )
-                resolved = self._resolve_conflicts(kb_dir, strategy)
+                resolved = self._resolve_conflicts(kb_dir, strategy, allow_force_reset=True)
                 return {
                     "pulled": True,
                     "conflictsResolved": resolved,
@@ -1805,7 +1823,7 @@ class GitService:
                 "拉取产生冲突，已保留冲突标记，请手工处理",
                 {"conflicts": conflicts},
             )
-        resolved = self._resolve_conflicts(kb_dir, strategy)
+        resolved = self._resolve_conflicts(kb_dir, strategy, allow_force_reset=True)
         self._set_upstream(kb_dir, branch)
         return {
             "pulled": True,
