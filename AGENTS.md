@@ -11,7 +11,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 测试：pytest + 本地 Python Mock 上游，禁止使用真实 API Key 或访问外部模型服务。
 - 配置：保存在用户目录（Windows `%APPDATA%\KnowledgeLib\settings.json`），不要提交到仓库。
 - 运行时数据：`data/`（知识库、回收站、缓存）不进入版本控制。
-- Git 同步：整个知识库根目录共用一个仓库；remote 存在根目录 `.git/config`，同步偏好存在用户配置目录 `settings.json` 的 `git` 段。
+- Git 同步：整个知识库根目录共用一个仓库；remote 存在根目录 `.git/config`，同步偏好存在用户配置目录 `settings.json` 的 `git` 段（含可选的上传子目录 `remoteDir`）。
 
 ## 硬性收尾流程
 
@@ -65,7 +65,7 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 所有测试必须离线运行，只使用 `tests/mock_upstream.py`、内存临时目录或临时本地 Git 裸仓库。
 - 不把真实 API Key 写进测试、命令、提交信息或日志。
 - 修 bug 时先补能复现问题的测试，再改实现；不允许通过删除/跳过测试让套件变绿。
-- 当前基线是 **88 个 pytest 用例**；新增功能应同步增加测试并更新 README 中的数量。
+- 当前基线是 **133 个 pytest 用例**；新增功能应同步增加测试并更新 README 中的数量。
 - 前端改动至少要被 `tests/test_static.py` 的 `node --check` 与 `byId` 检查覆盖。
 
 ## 版本控制纪律
@@ -87,7 +87,11 @@ KnowledgeLib 是本地运行的「学习路径生成 + 阅读工作台」：
 - 知识库/学习路径重命名只改 `.kb.json` / `.path.json` 的 `name`，不改目录名、slug 与文件内容。
 - 前端静态资源改动后，提醒用户重启后端（若改 Python）并 Ctrl+F5；后端改动只刷新页面不会生效。
 - 主题/液态玻璃/无衬线开关只存浏览器 `localStorage`；liquidGL 本地 vendored 且为 MIT，CSP 需要 `worker-src 'self' blob:`。
-- Git 同步设置（自动同步、间隔、方向、冲突策略、自定义命令）只存用户配置目录 `settings.json` 的 `git` 段；remote 存在知识库根目录的 `.git/config`，不得写进单个 `.kb.json` 或提交进仓库。
+- Git 同步设置（自动同步、间隔、方向、冲突策略、仓库内目录、自定义命令）只存用户配置目录 `settings.json` 的 `git` 段；remote 存在知识库根目录的 `.git/config`，不得写进单个 `.kb.json` 或提交进仓库。
+- 「仓库内目录」(`remoteDir`) 为空时同步仓库根目录；非空时推送必须基于远端树只替换该子目录，保留仓库内其他文件；拉取用 `refs/kl/base` 快照做三路合并，不得用整树覆盖本地。首次推送若远端目录已有文件必须要求先拉取；重复同步不得产生空提交；保存 remote 必须清除 `refs/kl` 快照；远端历史被重建或强推时不得把缺失目录当作删除，必须拒绝并要求重置。
+- 清空「仓库内目录」但仍存在 `refs/kl` 同步快照时必须拒绝同步（409 `git_mode_switch`），状态接口返回 `modeSwitchWarning` 说明原因；不得静默把整个远端仓库合并进知识库根目录。
+- 文件/目录互换（D/F）冲突必须拒绝并保持工作区原样（409 `git_conflict`，`details.reason` 为 `path_type`，`details.conflicts` 为路径数组），禁止用删除目录的方式「解决」冲突。
+- 远端分支消失或历史被替换必须按 `git_remote_rewritten` 拒绝并提示重新保存 remote 重置快照；文件夹模式下本地 `main` 与 `origin/main` 不同步，不得在该仓库目录执行命令行 `git pull` / `git push`。
 - 自定义 Git 命令必须以 `git` 或 `gh` 开头、不经 shell 执行，并拒绝 `-C` / `--git-dir` / `--work-tree` 等切仓参数；`gh` 通过 `KL_GH_PATH` / PATH / 常见安装目录解析，错误信息中的 remote URL 要脱敏。
 - 后台自动同步线程只在服务 lifespan 内启动；测试用临时裸仓库，不得访问 GitHub 等外部远端。旧版每库 `.git` 必须先迁移（备份到 `data/trash/git-repos`）或手工移除，否则拒绝初始化根仓库。
 
