@@ -33,10 +33,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
 
       # Deliberately no `uv`: only pip and the packages the offline tests import.
+      # Pin versions to avoid CI drift; when upgrading, keep the pyproject
+      # constraints in sync.
       - name: Install test dependencies
-        run: python -m pip install fastapi uvicorn httpx pytest pytest-asyncio
+        run: python -m pip install fastapi==0.162.7 uvicorn==0.54.0 httpx==0.28.1 pytest==9.2.0 pytest-asyncio==1.5.0
 
       - name: Run offline test suite
         run: python -m pytest -q
