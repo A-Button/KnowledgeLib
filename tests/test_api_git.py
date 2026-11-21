@@ -188,3 +188,31 @@ async def test_git_api_exposes_mode_switch_warning(client):
     blocked = await client.post("/api/git/sync", json={"direction": "pull"})
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "git_settings_invalid"
+
+
+@pytest.mark.asyncio
+async def test_git_api_mode_switch_warning_positive(client, tmp_path: Path):
+    created = await client.post("/api/kbs", json={"name": "切换警告 API 库"})
+    assert created.status_code == 200, created.text
+    remote = make_remote(tmp_path / "remote.git")
+    initialized = await client.post(
+        "/api/git/init", json={"remoteUrl": str(remote), "branch": "main"}
+    )
+    assert initialized.status_code == 200, initialized.text
+
+    # Folder mode was used before; the marker is internal state that survives
+    # clearing refs/kl (the API request model deliberately does not expose it).
+    config = client.app.state.kl.config
+    config.patch_git_state({"folderSyncUsed": True})
+
+    payload = (await client.get("/api/git")).json()
+    assert payload["remoteDir"] == ""
+    assert payload["modeSwitchWarning"], "folderSyncUsed 标记应产生 modeSwitchWarning"
+
+    blocked = await client.post("/api/git/sync", json={"direction": "pull"})
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "git_mode_switch"
+
+    ignored = await client.put("/api/git/settings", json={"folderSyncUsed": False})
+    assert ignored.status_code == 200, ignored.text
+    assert (await client.get("/api/git")).json()["modeSwitchWarning"]

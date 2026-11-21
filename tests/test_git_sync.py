@@ -1192,3 +1192,279 @@ def test_folder_conflict_local_deletion_keeps_remote_change_deleted(tmp_path: Pa
     assert not local.exists()
     assert (root / "第一文库" / ".kb.json").is_file()
     assert service.status()["conflicts"] == []
+
+
+def test_folder_local_type_swap_pull_succeeds(tmp_path: Path):
+    """A local directory -> file swap is a one-sided change, not a D/F conflict.
+
+    The remote folder did not change, so `git read-tree -m` keeps the local
+    swap. The pull must succeed instead of tripping the remote-driven D/F
+    precheck, and the following push must publish the local file.
+    """
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    swapped = root / "第一文库"
+    shutil.rmtree(swapped)
+    swapped.write_text("local file\n", encoding="utf-8")
+
+    try:
+        result = service.sync("pull", strategy="local")
+    except ApiError as exc:
+        pytest.fail(
+            f"远端目录未变化时本地目录↔文件互换应能拉取，实际 {exc.code}: {exc.message}"
+        )
+    assert result["ok"] is True
+    assert swapped.is_file()
+    assert swapped.read_text(encoding="utf-8") == "local file\n"
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+    assert status["dirty"] is False
+
+    pushed = service.sync("push")
+    assert pushed["ok"] is True
+    verify = clone_remote(remote, tmp_path / "type-swap-verify")
+    remote_target = verify / "kb" / "第一文库"
+    assert remote_target.is_file()
+    assert remote_target.read_text(encoding="utf-8") == "local file\n"
+    assert (verify / "kb" / "第二文库" / "01-进阶.md").is_file()
+
+
+def test_folder_local_type_swap_remote_strategy_keeps_content(tmp_path: Path):
+    """`strategy="remote"` must never delete the swapped-in local file.
+
+    With an unchanged remote tree the server side has nothing to apply; if the
+    sync refuses, the local file has to survive and a retry with the safe
+    (local) strategy has to converge instead of silently removing content.
+    """
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    swapped = root / "第一文库"
+    document = root / "第二文库" / "01-进阶.md"
+    other_before = document.read_text(encoding="utf-8")
+    shutil.rmtree(swapped)
+    swapped.write_text("local file\n", encoding="utf-8")
+
+    failure: ApiError | None = None
+    try:
+        result = service.sync("pull", strategy="remote")
+    except ApiError as exc:
+        failure = exc
+        result = None
+
+    assert swapped.is_file(), "本地被换成的文件不应被删除"
+    assert swapped.read_text(encoding="utf-8") == "local file\n"
+    assert document.is_file()
+    assert document.read_text(encoding="utf-8") == other_before
+
+    if failure is not None:
+        assert failure.code == "git_conflict"
+        details = failure.details or {}
+        assert "第一文库" in (details.get("conflicts") or [])
+        # The refusal must not be "resolved" by dropping local content: retrying
+        # with the safe (local) strategy has to converge and keep the file.
+        try:
+            recovered = service.sync("pull", strategy="local")
+        except ApiError as exc:
+            pytest.fail(
+                f"改选本地策略后应能收敛并保留本地文件，实际 {exc.code}: {exc.message}"
+            )
+        assert recovered["ok"] is True
+        assert swapped.is_file()
+        assert swapped.read_text(encoding="utf-8") == "local file\n"
+        assert service.status()["conflicts"] == []
+    else:
+        assert result is not None and result["ok"] is True
+
+
+def test_folder_mode_switch_blocked_after_dir_rename(tmp_path: Path):
+    """The folder-mode marker survives remoteDir changes until the remote is reset."""
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb-a"})
+    service.sync("push")
+
+    service.update_settings({"remoteDir": "kb-b"})
+    assert git("for-each-ref", "--format=%(refname)", "refs/kl", cwd=root).stdout.strip() == ""
+    service.update_settings({"remoteDir": ""})
+    assert git("for-each-ref", "--format=%(refname)", "refs/kl", cwd=root).stdout.strip() == ""
+
+    status = service.status()
+    assert status["folderMode"] is False
+    assert status["modeSwitchWarning"], "清空 remoteDir 后 status 应返回 modeSwitchWarning"
+
+    for direction in ("pull", "push"):
+        with pytest.raises(ApiError) as blocked:
+            service.sync(direction)
+        assert blocked.value.code == "git_mode_switch"
+    assert (root / "第一文库" / "01-基础.md").is_file()
+    assert (root / "第一文库" / ".kb.json").is_file()
+
+    service.set_remote(str(remote))
+    assert service.status()["modeSwitchWarning"] == ""
+    result = service.sync("pull")
+    assert result["ok"] is True
+
+
+def test_folder_stale_probe_lock_does_not_block(tmp_path: Path):
+    """A lock file left by a crashed probe must not block every later pull."""
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    (root / ".git" / "kl-probe.index.lock").write_text("stale\n", encoding="utf-8")
+    (root / ".git" / "kl-probe-999999.index.lock").write_text("stale\n", encoding="utf-8")
+
+    edit_remote_file(
+        remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端新内容\n"
+    )
+    try:
+        result = service.sync("pull")
+    except ApiError as exc:
+        pytest.fail(f"残留 probe 锁不应阻断拉取，实际 {exc.code}: {exc.message}")
+    assert result["ok"] is True
+    assert result["pulled"] is True
+    updated = root / "第一文库" / "01-基础.md"
+    assert "远端新内容" in updated.read_text(encoding="utf-8")
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+    assert status["dirty"] is False
+
+
+def test_folder_sync_clears_upstream(tmp_path: Path):
+    """Folder mode must leave the local branch without an upstream."""
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.sync("push")
+    assert service._upstream(root) == "origin/main"
+
+    clone = clone_remote(remote, tmp_path / "readme-clone")
+    (clone / "README.md").write_text("repo readme\n", encoding="utf-8")
+    git("add", "-A", cwd=clone)
+    git("commit", "-m", "add repo readme", cwd=clone)
+    git("push", "origin", "main", cwd=clone)
+
+    service.update_settings({"remoteDir": "kb"})
+    pushed = service.sync("push")
+    assert pushed["ok"] is True
+    assert service._upstream(root) == "", "文件夹模式推送后本地分支不应保留 upstream"
+    with pytest.raises(subprocess.CalledProcessError):
+        git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=root)
+
+    verify = clone_remote(remote, tmp_path / "layout-verify")
+    assert (verify / "README.md").read_text(encoding="utf-8") == "repo readme\n"
+    assert (verify / "kb" / "第一文库" / "01-基础.md").is_file()
+
+
+def test_folder_sync_works_in_linked_worktree(tmp_path: Path):
+    """A linked worktree (`.git` is a file) must support folder sync end to end."""
+    remote = make_remote(tmp_path / "remote.git")
+    main_repo = tmp_path / "main-repo"
+    main_repo.mkdir()
+    git("init", "--initial-branch=trunk", str(main_repo))
+    (main_repo / "README.md").write_text("main repo readme\n", encoding="utf-8")
+    git("add", "-A", cwd=main_repo)
+    git("commit", "-m", "init main repo", cwd=main_repo)
+    worktree = tmp_path / "library-worktree"
+    git("worktree", "add", "-b", "main", str(worktree), cwd=main_repo)
+    assert (worktree / ".git").is_file()
+
+    first = library.create_kb(worktree, "第一文库")
+    first_dir = worktree / first["slug"]
+    (first_dir / "01-基础.md").write_text("# 01 · 基础\n\n第一库内容\n", encoding="utf-8")
+
+    service = make_service(tmp_path, worktree)
+    service.init_repo(str(remote))
+    service.sync("push")
+    assert service._upstream(worktree) == "origin/main"
+
+    service.update_settings({"remoteDir": "kb"})
+    pushed = service.sync("push")
+    assert pushed["ok"] is True
+    assert service._upstream(worktree) == "", "worktree 内文件夹模式推送后不应保留 upstream"
+
+    edit_remote_file(
+        remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端内容\n"
+    )
+    result = service.sync("pull")
+    assert result["ok"] is True
+    document = worktree / "第一文库" / "01-基础.md"
+    assert document.is_file()
+    assert "远端内容" in document.read_text(encoding="utf-8")
+    assert (worktree / "第一文库" / ".kb.json").is_file()
+    assert service._upstream(worktree) == "", "文件夹模式拉取后不应重新建立 upstream"
+    status = service.status()
+    assert status["managed"] is True
+    assert status["folderMode"] is True
+    assert status["conflicts"] == []
+    assert status["dirty"] is False
+
+
+def test_folder_pull_rejects_remote_dir_as_file(tmp_path: Path):
+    """A file where the remote folder path should be must fail closed.
+
+    Two variants matter: the configured folder itself is replaced by a file,
+    and one of its ancestors is replaced by a file (the path then no longer
+    resolves, and treating that as a remote folder deletion would wipe the
+    local library).
+    """
+
+    def snapshot(root: Path) -> dict[str, str]:
+        state: dict[str, str] = {}
+        for entry in sorted(root.rglob("*")):
+            relative = entry.relative_to(root).as_posix()
+            if relative == ".git" or relative.startswith(".git/"):
+                continue
+            state[relative] = entry.read_text(encoding="utf-8") if entry.is_file() else "<dir>"
+        return state
+
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+    before = snapshot(root)
+    replace_remote_directory_with_file(remote, tmp_path, "kb", "remote file\n")
+
+    with pytest.raises(ApiError) as failure:
+        service.sync("pull")
+    assert failure.value.code == "git_pull_failed"
+    assert "不是文件夹" in failure.value.message
+    assert snapshot(root) == before
+    assert (root / "第一文库" / "01-基础.md").is_file()
+    assert (root / "第一文库" / ".kb.json").is_file()
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    root, remote = make_library(nested)
+    service = make_service(nested, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb/sub"})
+    service.sync("push")
+    before = snapshot(root)
+    replace_remote_directory_with_file(remote, nested, "kb", "remote file\n")
+
+    try:
+        service.sync("pull")
+    except ApiError as exc:
+        failure = exc
+    else:
+        pytest.fail("远端祖先目录被换成文件时不得按「远端删除目录」静默清空本地内容")
+    assert failure.code == "git_pull_failed"
+    assert "不是文件夹" in failure.message
+    assert snapshot(root) == before
+    assert (root / "第一文库" / "01-基础.md").is_file()
+    assert (root / "第一文库" / ".kb.json").is_file()

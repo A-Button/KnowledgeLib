@@ -41,6 +41,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "lastStatus": "never",
     "lastMessage": "",
     "lastDirection": "",
+    "folderSyncUsed": False,
 }
 
 _COMMAND_FORBIDDEN = (";", ">", "<", chr(96), "$(")
@@ -263,6 +264,10 @@ def normalize_git_settings(current: Mapping[str, Any], patch: Mapping[str, Any])
         result["pushCommand"] = validate_command(patch["pushCommand"], "自定义推送命令")
     if "pullCommand" in patch:
         result["pullCommand"] = validate_command(patch["pullCommand"], "自定义拉取命令")
+    if "folderSyncUsed" in patch:
+        if not isinstance(patch["folderSyncUsed"], bool):
+            raise ApiError(400, "invalid_request", "folderSyncUsed 必须是布尔值")
+        result["folderSyncUsed"] = patch["folderSyncUsed"]
     result["updatedAt"] = utc_now_iso()
     return result
 
@@ -314,6 +319,9 @@ class GitService:
             try:
                 self._clear_folder_refs(self.root())
             except ApiError:
+                # Defensive only: saving settings must not fail when git is not
+                # installed or the repository is temporarily unavailable. The
+                # snapshots are cleared again by the next `set_remote`.
                 pass
         return after
 
@@ -463,6 +471,22 @@ class GitService:
             path = Path(kb_dir) / path
         return path
 
+    @staticmethod
+    def _discard_index(index_path: Path) -> None:
+        """Best-effort removal of a temporary index file and its lock file.
+
+        An interrupted git process can leave `<index>.lock` behind, which would
+        block every later run that uses the same index path. The temporary
+        indexes are per-process (`kl-*-{pid}.index`), so a leftover lock from a
+        killed previous process can never block later pulls or pushes; the
+        lock is still removed with its index to keep the git directory clean.
+        """
+        for candidate in (index_path, index_path.with_name(index_path.name + ".lock")):
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+
     def _managed(self, kb_dir: Path) -> bool:
         if not (Path(kb_dir) / ".git").exists():
             return False
@@ -513,12 +537,23 @@ class GitService:
         self,
         kb_dir: Path,
         extra_env: Mapping[str, str] | None = None,
+        strict: bool = False,
     ) -> dict[str, dict[int, tuple[str, str]]]:
-        """Parse `ls-files -u` into path -> {stage: (mode, object)}."""
-        code, out, _ = self._run(
+        """Parse `ls-files -u` into path -> {stage: (mode, object)}.
+
+        `strict` is used by the merge probe: a failing `ls-files` there means
+        the probe cannot prove the merge is safe, so the pull must fail closed
+        instead of assuming "no conflicts". Conflict resolution keeps the
+        fail-open default because a partial listing must not lose data.
+        """
+        code, out, err = self._run(
             ["ls-files", "-u", "-z"], kb_dir, timeout=30, extra_env=extra_env
         )
-        if code != 0 or not out:
+        if code != 0:
+            if strict:
+                raise ApiError(409, "git_pull_failed", f"预检合并结果失败：{_tail(err or out)}")
+            return {}
+        if not out:
             return {}
         entries: dict[str, dict[int, tuple[str, str]]] = {}
         for record in out.split("\0"):
@@ -597,11 +632,17 @@ class GitService:
         remote_dir_error = str(settings.get("remoteDirError") or "")
         mode_switch_warning = ""
         if not remote_dir and not remote_dir_error:
-            try:
-                if self._has_folder_refs(root):
-                    mode_switch_warning = _MODE_SWITCH_WARNING
-            except ApiError:
-                mode_switch_warning = ""
+            # Folder mode is remembered even after its refs/kl snapshots were
+            # cleared: root mode would merge the whole remote repository into
+            # the library root, so a stale folder history must keep blocking.
+            if bool(settings.get("folderSyncUsed")):
+                mode_switch_warning = _MODE_SWITCH_WARNING
+            else:
+                try:
+                    if self._has_folder_refs(root):
+                        mode_switch_warning = _MODE_SWITCH_WARNING
+                except ApiError:
+                    mode_switch_warning = ""
         result: dict[str, Any] = {
             "available": bool(shutil.which("git")),
             "managed": False,
@@ -814,8 +855,10 @@ class GitService:
         if code != 0:
             raise ApiError(502, "git_remote_failed", f"保存 remote 失败：{_tail(err or out)}")
         # Saving the remote explicitly resets folder snapshots. This is also the
-        # escape hatch after a repository is recreated or force-pushed.
+        # escape hatch after a repository is recreated or force-pushed, so the
+        # folder-mode marker must be cleared here as well.
         self._clear_folder_refs(root)
+        self.config.patch_git_state({"folderSyncUsed": False})
         return self.status()
 
     # ------------------------------------------------------------------- sync
@@ -876,7 +919,15 @@ class GitService:
             raise ApiError(409, "git_no_remote", "尚未添加 Git remote，请先填写远端地址")
         branch = self._branch(kb_dir)
         remote_dir = str(settings.get("remoteDir") or "")
-        if not remote_dir and self._has_folder_refs(kb_dir):
+        if remote_dir:
+            # Persist the folder-mode marker on every folder sync. It is the
+            # guard of last resort when the refs/kl snapshots are later cleared
+            # (for example after switching remoteDir to a different folder and
+            # back to root mode) but folder mode was definitely used before.
+            self.config.patch_git_state({"folderSyncUsed": True})
+        if not remote_dir and (
+            self._has_folder_refs(kb_dir) or bool(settings.get("folderSyncUsed"))
+        ):
             # Root mode would merge the whole remote repository (including the
             # old library folder) into the library; refuse instead.
             raise ApiError(409, "git_mode_switch", _MODE_SWITCH_WARNING)
@@ -961,20 +1012,66 @@ class GitService:
         if not conflicts:
             return 0
         stages = self._unmerged_stages(kb_dir)
+        if selected_stage == 3:
+            # "Prefer remote" must not check out a path where the remote side
+            # replaced a directory with a file: git would delete the local
+            # directory and every local file below it before the per-path
+            # guards in the loop can keep the conflict. Refuse up front, before
+            # touching the index or working tree, so the fallback stays safe
+            # even when the D/F probe was skipped or missed the clash.
+            remote_files = [
+                path
+                for path in self._path_type_conflicts(stages)
+                if 3 in stages.get(path, {})
+            ]
+            if remote_files:
+                shown = "、".join(remote_files[:3])
+                raise ApiError(
+                    409,
+                    "git_conflict",
+                    f"远端与本地存在文件/目录互换（{shown}），已中止以避免误删；"
+                    "请先调整后再同步；若远端没有变化，可直接使用「推送」",
+                    {"conflicts": remote_files, "reason": "path_type"},
+                )
         for path in conflicts:
             code, _, _ = self._run(["checkout", f"--{side}", "--", path], kb_dir, timeout=30)
             if code == 0:
                 continue
-            if selected_stage in stages.get(path, {}):
+            path_stages = stages.get(path, {})
+            if selected_stage in path_stages:
                 # The selected side still has content but git refused to write
                 # it (for example a file/directory clash). Leave it unmerged so
                 # the check below reports a conflict instead of losing data.
+                continue
+            if any(other.startswith(path + "/") for other in stages):
+                # Other unmerged paths live below this one, so this is a
+                # file/directory prefix clash. Removing `path` here would wipe
+                # the local side and could cascade into deleting the whole
+                # directory. Leave it unmerged and let the check below report
+                # a conflict; this guard also covers a D/F probe that was
+                # skipped or missed the clash.
                 continue
             if (Path(kb_dir) / path).is_dir():
                 # The selected side removed this file while the local side
                 # turned it into a directory. Never delete the directory: the
                 # following `git add -A` stages the local tree as-is.
                 continue
+            if 1 not in path_stages and 2 in path_stages:
+                # The merge base had no file here but the local side has one,
+                # which means the remote side has a directory at this path.
+                # "Prefer remote" would have to delete the local file to make
+                # room for it, and because the paths below it may already have
+                # been resolved as one-sided deletions, the remote directory
+                # would not even be restored. Refuse instead of silently
+                # dropping local content; this is the fallback for a D/F
+                # precheck that was skipped or missed the clash.
+                raise ApiError(
+                    409,
+                    "git_conflict",
+                    f"远端在 {path} 是目录、本地是文件，无法自动应用「优先远端」；"
+                    "请先调整后再同步；若远端没有变化，可直接使用「推送」",
+                    {"conflicts": [path], "reason": "path_type"},
+                )
             self._run(["rm", "-f", "--ignore-unmatch", "--", path], kb_dir, timeout=30)
         self._run(["add", "-A"], kb_dir, timeout=60)
         remaining = self._conflicts(kb_dir)
@@ -1135,13 +1232,10 @@ class GitService:
 
         The rest of the remote tree (README, other folders, ...) is preserved.
         """
-        index_path = self._git_path(kb_dir, "kl-sync.index")
+        index_path = self._git_path(kb_dir, f"kl-sync-{os.getpid()}.index")
         index_env = {"GIT_INDEX_FILE": str(index_path)}
         try:
-            try:
-                index_path.unlink()
-            except OSError:
-                pass
+            self._discard_index(index_path)
             if remote_commit:
                 code, out, err = self._run(["read-tree", remote_commit], kb_dir, timeout=60, extra_env=index_env)
             else:
@@ -1170,10 +1264,7 @@ class GitService:
                 raise ApiError(500, "git_sync_failed", f"生成远端目录树失败：{_tail(err or out)}")
             return out.strip()
         finally:
-            try:
-                index_path.unlink()
-            except OSError:
-                pass
+            self._discard_index(index_path)
 
     def _write_merge_head(self, kb_dir: Path, commit: str) -> None:
         try:
@@ -1263,14 +1354,16 @@ class GitService:
         The probe never passes `-u`, so neither the index nor the working tree
         of the repository is modified. Refresh is required because the next
         `read-tree -m` refuses to merge an index with stale stat information.
+
+        The index name is unique per process: a leftover `*.index.lock` from a
+        killed previous process therefore cannot permanently block later pulls.
+        A failing `ls-files -u` fails the probe closed, because an unreadable
+        conflict list must not be mistaken for "no conflicts".
         """
-        index_path = self._git_path(kb_dir, "kl-probe.index")
+        index_path = self._git_path(kb_dir, f"kl-probe-{os.getpid()}.index")
         probe_env = {"GIT_INDEX_FILE": str(index_path)}
         try:
-            try:
-                index_path.unlink()
-            except OSError:
-                pass
+            self._discard_index(index_path)
             code, out, err = self._run(
                 ["read-tree", "--reset", "HEAD"], kb_dir, timeout=60, extra_env=probe_env
             )
@@ -1285,12 +1378,21 @@ class GitService:
             )
             if code != 0:
                 raise ApiError(409, "git_pull_failed", f"预检合并结果失败：{_tail(err or out)}")
-            return self._unmerged_stages(kb_dir, extra_env=probe_env)
+            return self._unmerged_stages(kb_dir, extra_env=probe_env, strict=True)
         finally:
-            try:
-                index_path.unlink()
-            except OSError:
-                pass
+            self._discard_index(index_path)
+
+    def _unset_upstream(self, kb_dir: Path, branch: str) -> None:
+        """Drop the branch upstream that root mode left behind via `push -u`.
+
+        Folder mode never pushes the local branch: it builds a synthetic commit
+        from the remote tree and pushes that, so a leftover upstream would make
+        a bare `git push` in the library directory send local `main` (root
+        layout) over the remote branch and silently overwrite the folder
+        layout. Removing the upstream makes such accidental pushes fail. The
+        command is best-effort: the branch may have no upstream configured.
+        """
+        self._run(["branch", "--unset-upstream", branch], kb_dir, timeout=15)
 
     def _pull_folder(
         self,
@@ -1300,6 +1402,7 @@ class GitService:
         remote_url: str,
         remote_dir: str,
     ) -> dict[str, Any]:
+        self._unset_upstream(kb_dir, branch)
         code, out, err = self._run(["fetch", "origin", "--prune"], kb_dir, timeout=180)
         if code != 0:
             raise self._remote_error("git_fetch_failed", "拉取远端失败", out, err, remote_url)
@@ -1326,6 +1429,21 @@ class GitService:
         remote_tree = self._rev(kb_dir, f"{remote_ref}:{remote_dir}")
         removed = False
         if not remote_tree:
+            # An unresolvable `<remote_dir>` is normally a remotely deleted
+            # folder. It can also mean a file now sits at one of its ancestor
+            # paths (for example `kb` replaced by a blob while `kb/sub` is the
+            # configured folder); treating that as a deletion would wipe the
+            # local library, so fail closed instead.
+            parts = remote_dir.split("/")
+            for index in range(1, len(parts)):
+                prefix = "/".join(parts[:index])
+                kind = self._path_type(kb_dir, f"{remote_ref}:{prefix}")
+                if kind and kind != "tree":
+                    raise ApiError(
+                        409,
+                        "git_pull_failed",
+                        f"远端的 {prefix} 不是文件夹，无法拉取 {remote_dir}/",
+                    )
             if not base_commit:
                 return {"pulled": False, "message": f"远端还没有 {remote_dir}/ 目录，已跳过拉取"}
             if base_tree == empty_tree:
@@ -1370,19 +1488,24 @@ class GitService:
                     f"初始化空仓库提交失败：{_tail(err or out)}",
                 )
         head_tree = self._rev(kb_dir, "HEAD^{tree}")
-        # Probe the merge in a throwaway index before anything touches the
-        # working tree: a file <-> directory swap cannot be resolved safely and
-        # applying it would delete local content for every strategy.
-        probe_unmerged = self._merge_probe_unmerged(kb_dir, base_tree, remote_tree)
-        path_type_conflicts = self._path_type_conflicts(probe_unmerged)
-        if path_type_conflicts:
-            shown = "、".join(path_type_conflicts[:3])
-            raise ApiError(
-                409,
-                "git_conflict",
-                f"远端与本地存在文件/目录互换（{shown}），已中止以避免误删；请先调整后再同步",
-                {"conflicts": path_type_conflicts, "reason": "path_type"},
-            )
+        if base_tree != remote_tree:
+            # Probe the merge in a throwaway index before anything touches the
+            # working tree: a remote-driven file <-> directory swap cannot be
+            # resolved safely and applying it would delete local content for
+            # every strategy. When the remote tree is identical to the merge
+            # base the swap is a single-sided local change: the three-way merge
+            # below keeps it, and `_resolve_conflicts` refuses to delete it.
+            probe_unmerged = self._merge_probe_unmerged(kb_dir, base_tree, remote_tree)
+            path_type_conflicts = self._path_type_conflicts(probe_unmerged)
+            if path_type_conflicts:
+                shown = "、".join(path_type_conflicts[:3])
+                raise ApiError(
+                    409,
+                    "git_conflict",
+                    f"远端与本地存在文件/目录互换（{shown}），已中止以避免误删；"
+                    "请先调整后再同步；若远端没有变化，可直接使用「推送」",
+                    {"conflicts": path_type_conflicts, "reason": "path_type"},
+                )
         code, out, err = self._run(["read-tree", "--reset", "-u", "HEAD"], kb_dir, timeout=60)
         if code != 0:
             raise ApiError(409, "git_pull_failed", f"重置工作区失败：{_tail(err or out)}")
@@ -1474,6 +1597,7 @@ class GitService:
         remote_dir: str,
         skip_fetch: bool = False,
     ) -> dict[str, Any]:
+        self._unset_upstream(kb_dir, branch)
         self._ensure_identity(kb_dir)
         if not skip_fetch:
             code, out, err = self._run(["fetch", "origin", "--prune"], kb_dir, timeout=180)
