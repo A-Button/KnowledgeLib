@@ -4,7 +4,7 @@
 
 后端 Python 3.11+ / FastAPI / Uvicorn / httpx（uv 管理，默认 USTC 镜像）；前端原生 HTML / CSS / JavaScript，无构建步骤、无外部 CDN 与外部字体；测试用 pytest + 本地 Python Mock 上游，全程离线，不接触真实 API Key。
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white) ![Tests](https://img.shields.io/badge/pytest-133%20offline%20tests-0A9EDC?logo=pytest&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-2ea44f)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white) ![Tests](https://img.shields.io/badge/pytest-148%20offline%20tests-0A9EDC?logo=pytest&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-2ea44f)
 
 ## 目录
 
@@ -139,7 +139,7 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：**函数工�
 | 初始化 | 在知识库根目录建立仓库（默认分支 main），写入基础 .gitignore，把全部知识库提交为首个版本；可同时填写远端。 |
 | Remote | 支持 HTTPS、SSH、file:// 与本地路径，固定为 origin；远端地址存在根目录的 .git/config，不写进任何知识库元数据，凭据沿用系统 Git 配置。 |
 | 范围 | 根目录下所有知识库、学习路径和 Markdown 资料一次性提交、拉取和推送。 |
-| 仓库内目录 | 可选；把整个文库集上传到远端仓库的指定文件夹，支持多级路径与自定义名称（如 `知识库` 或 `notes/kb`）。同步只替换该文件夹，仓库内 README、其他目录等文件保持不变；留空时同步到仓库根目录。首次同步时若远端目录已有文件，需先拉取导入；拉取以远端目录为准，远端删除文件或整个目录会同步删除本地对应内容（有本地改动时按冲突策略处理）；重复同步不会产生空提交。清空该设置时若仍存在 `refs/kl` 快照，会以 `git_mode_switch` 拒绝并阻塞同步，需先清理远端旧内容并重新保存 remote 重置快照。 |
+| 仓库内目录 | 可选；把整个文库集上传到远端仓库的指定文件夹，支持多级路径与自定义名称（如 `知识库` 或 `notes/kb`）。同步只替换该文件夹，仓库内 README、其他目录等文件保持不变；留空时同步到仓库根目录。首次同步时若远端目录已有文件，需先拉取导入；拉取以远端目录为准，远端删除文件或整个目录会同步删除本地对应内容（有本地改动时按冲突策略处理）；重复同步不会产生空提交。清空该设置时，只要曾用文件夹模式同步过（或仍存在 `refs/kl` 快照），就会以 `git_mode_switch` 拒绝并阻塞同步，需先清理远端旧内容并重新保存 remote 重置同步状态与快照。 |
 | 手动操作 | 拉取、推送、立即同步（先拉后推）与刷新状态；拉取使用 fetch + merge，不改写本地提交。 |
 | 自动同步 | 全局间隔 1..1440 分钟，方向为「先拉后推 / 仅拉取 / 仅推送」；服务每 30 秒检查一次，到期才执行，默认关闭。 |
 | 自动提交 | 默认开启：同步前若有改动，先 git add -A 并创建同步提交；关闭时遇到未提交改动会拒绝同步。 |
@@ -147,14 +147,16 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：**函数工�
 | 自定义命令 | 可分别覆盖拉取与推送命令；命令必须以 git 或 gh 开头、不经 shell，支持 {branch}、{remote}、{url}、{kb}、{dir} 占位符，留空时使用内置命令。gh 需已安装并登录。自定义命令会覆盖内置的「仓库内目录」映射。 |
 | 旧仓库迁移 | 若检测到知识库目录内仍有旧版每库 .git，可勾选迁移，把旧仓库备份到 data/trash/git-repos 后再建立根仓库。 |
 
-同步设置写入用户配置 settings.json 的 git 段（不再使用 git-sync.json）；remote 存在知识库根目录的 .git/config。指定「仓库内目录」时，内置同步会在本地 `refs/kl/base`、`refs/kl/tip`、`refs/kl/local` 记录远端目录快照与同步进度，用于三路合并和领先 / 落后计数；这些引用只存在本地仓库；重新保存 remote 会清空它们（切换远端或仓库被重建、强推后，用重新保存 remote 重置同步快照）。远端历史被替换时会拒绝同步而不是删除本地文件。服务端设置 GIT_TERMINAL_PROMPT=0，需要交互输入密码时直接失败，避免后台任务挂起。
+同步设置写入用户配置 settings.json 的 git 段（不再使用 git-sync.json）；remote 存在知识库根目录的 .git/config。指定「仓库内目录」时，内置同步会在本地 `refs/kl/base`、`refs/kl/tip`、`refs/kl/local` 记录远端目录快照与同步进度，用于三路合并和领先 / 落后计数；这些引用只存在本地仓库；重新保存 remote 会清空它们并重置文件夹模式同步状态（切换远端或仓库被重建、强推后，用重新保存 remote 重置同步快照）。远端历史被替换时会拒绝同步而不是删除本地文件。服务端设置 GIT_TERMINAL_PROMPT=0，需要交互输入密码时直接失败，避免后台任务挂起。
 
 模式切换与远端历史变化需要特别注意：
 
-- **从文件夹模式切回根目录模式**：根目录模式会用 `git merge --allow-unrelated-histories` 把整个远端仓库合并进知识库根目录，仓库里的 README、其他目录都会一并进入本地知识库。因此清空「仓库内目录」之前，必须先手工清理远端旧内容，再重新保存 remote 重置 `refs/kl` 快照；否则状态接口会给出 `modeSwitchWarning`，同步以 409 `git_mode_switch` 拒绝。
-- **文件夹模式下只通过界面同步**：应用只用 `git commit-tree` 生成合成提交再推送，本地 `main` 不会与 `origin/main` 同步。在该仓库目录执行命令行 `git pull` / `git push` 会与本地历史分叉：`push` 覆盖远端布局，`pull` 会把整个远端仓库合并进知识库目录。请只使用界面上的拉取 / 推送按钮。
+- **从文件夹模式切回根目录模式**：根目录模式会用 `git merge --allow-unrelated-histories` 把整个远端仓库合并进知识库根目录，仓库里的 README、其他目录都会一并进入本地知识库。因此清空「仓库内目录」之前，必须先手工清理远端旧内容，再重新保存 remote 重置同步状态与 `refs/kl` 快照；只要曾用文件夹模式同步过（内部状态 `folderSyncUsed`），即使 `refs/kl` 快照已不存在，状态接口仍会给出 `modeSwitchWarning`，同步以 409 `git_mode_switch` 拒绝。
+- **文件夹模式下只通过界面同步**：应用只用 `git commit-tree` 生成合成提交再推送，本地 `main` 不会与 `origin/main` 同步；文件夹模式下应用还会在每次拉取 / 推送后解除 `origin/<branch>` 的 upstream（用户自定义的其它 upstream 保留），避免裸 `git push` 静默覆盖远端布局（默认配置下裸 `git push` 会失败；若设置了 `push.autoSetupRemote=true` 仍可能成功并覆盖，显式 `git push origin main` 也可能覆盖）。上游被解除后裸 `git pull` 会因缺少跟踪信息而失败；显式 `git pull origin main` 在允许合并的分叉策略下（如 `pull.rebase=false`）仍可能把整个远端仓库合并进知识库目录。请只使用界面上的拉取 / 推送按钮。
 - **远端历史被替换**：远端分支被删除或仓库被重建会被识别为历史替换，同步以 409 `git_remote_rewritten` 拒绝而不是删除本地文件，需要重新保存 remote 重置快照后再同步。
 - **旧内容不会自动删除**：从根目录模式切到「仓库内目录」时，远端根目录原有内容会保留，不会被自动移入子目录；给「仓库内目录」改名也不会清理远端旧目录。确认无用后可手工整理。
+
+**文件夹模式下的文件 / 目录互换（D/F）**：拉取时若远端把某个目录换成了文件（或反向，如 `知识库/第一文库`），会以 409 `git_conflict` 拒绝（四种冲突策略一致；`details.reason` 为 `path_type`，`details.conflicts` 为冲突的顶层路径数组），本地工作区与 `.kb.json` 保持原样，需要先手工调整再同步；错误文案可能追加「若远端没有变化，可直接使用『推送』」。若只是本地把文件与目录互换且远端没有变化，则不再被预检一律拒绝：选「优先本地」可正常收敛；选「停止并保留现场」会再次以 409 中止（内容保留，可改用「推送」或手工处理）；「优先远端」仍会以 409 拒绝并提示先手工调整，确认远端没有变化时也可直接使用「推送」。
 
 ## 配置与数据
 
@@ -203,7 +205,7 @@ data/
 
 ## 测试
 
-全部测试使用本地 Python Mock 上游与临时本地 Git 裸仓库（`tests/mock_upstream.py`），只监听 `127.0.0.1`，不访问外网与托管远端；当前共 **133 个 pytest 用例**。
+全部测试使用本地 Python Mock 上游与临时本地 Git 裸仓库（`tests/mock_upstream.py`），只监听 `127.0.0.1`，不访问外网与托管远端；当前共 **148 个 pytest 用例**。
 
 ```bash
 uv run pytest -q                    # 全量用例
