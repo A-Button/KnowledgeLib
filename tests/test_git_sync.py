@@ -1468,3 +1468,220 @@ def test_folder_pull_rejects_remote_dir_as_file(tmp_path: Path):
     assert snapshot(root) == before
     assert (root / "第一文库" / "01-基础.md").is_file()
     assert (root / "第一文库" / ".kb.json").is_file()
+
+
+def test_folder_df_refusal_clears_merge_state(tmp_path: Path):
+    """A refused local directory -> file swap must leave no half-applied merge.
+
+    The remote folder did not change, so the pull is a one-sided local change.
+    If a strategy still refuses it (409 `git_conflict`), the failed three-way
+    merge has to be rolled back: `status()` must be clean, the local file has
+    to survive untouched, and a following push has to publish it.
+    """
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    swapped = root / "第一文库"
+    document = root / "第二文库" / "01-进阶.md"
+    other_before = document.read_text(encoding="utf-8")
+    shutil.rmtree(swapped)
+    swapped.write_text("local file\n", encoding="utf-8")
+
+    with pytest.raises(ApiError) as refusal:
+        service.sync("pull", strategy="remote")
+    assert refusal.value.code == "git_conflict"
+
+    # The refusal must not leave an unmerged index, MERGE_HEAD or dirty files.
+    status = service.status()
+    assert status["mergeInProgress"] is False, "D/F 409 后不应残留合并状态"
+    assert status["conflicts"] == [], "D/F 409 后不应残留未解决冲突"
+    assert status["dirty"] is False, "D/F 409 后工作区应与 HEAD 一致"
+    assert swapped.is_file(), "本地被换成的文件不应被删除"
+    assert swapped.read_text(encoding="utf-8") == "local file\n"
+    assert document.read_text(encoding="utf-8") == other_before
+
+    # With the merge state cleared, the documented recovery ("push instead")
+    # has to work and the remote ends up with the local file at 第一文库.
+    pushed = service.sync("push")
+    assert pushed["ok"] is True
+    verify = clone_remote(remote, tmp_path / "df-refusal-verify")
+    remote_target = verify / "kb" / "第一文库"
+    assert remote_target.is_file(), "推送后远端 第一文库 应是文件"
+    assert remote_target.read_text(encoding="utf-8") == "local file\n"
+    assert (verify / "kb" / "第二文库" / "01-进阶.md").is_file()
+
+
+def test_folder_df_refusal_then_local_strategy_converges(tmp_path: Path):
+    """After a refused `remote` pull, switching to `local` has to converge."""
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    swapped = root / "第一文库"
+    shutil.rmtree(swapped)
+    swapped.write_text("local file\n", encoding="utf-8")
+
+    with pytest.raises(ApiError) as refusal:
+        service.sync("pull", strategy="remote")
+    assert refusal.value.code == "git_conflict"
+
+    try:
+        recovered = service.sync("pull", strategy="local")
+    except ApiError as exc:
+        pytest.fail(
+            f"改选本地策略后应能收敛并保留本地文件，实际 {exc.code}: {exc.message}"
+        )
+    assert recovered["ok"] is True
+    assert swapped.is_file(), "改选本地策略后本地文件不应被删除"
+    assert swapped.read_text(encoding="utf-8") == "local file\n"
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+    assert status["dirty"] is False
+
+
+def test_folder_pull_preserves_custom_upstream(tmp_path: Path):
+    """Folder mode only unsets the `origin/*` upstream that it creates itself.
+
+    A user-configured upstream such as `other/main` is unrelated to the folder
+    sync and must survive both the pull and its upstream cleanup.
+    """
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    git("remote", "add", "other", str(remote), cwd=root)
+    git("fetch", "other", cwd=root)
+    git("branch", "--set-upstream-to=other/main", "main", cwd=root)
+    assert service._upstream(root) == "other/main"
+
+    edit_remote_file(
+        remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端新内容\n"
+    )
+    result = service.sync("pull")
+    assert result["ok"] is True
+    assert "远端新内容" in (root / "第一文库" / "01-基础.md").read_text(
+        encoding="utf-8"
+    )
+    assert service._upstream(root) == "other/main", "自定义 upstream 不应被解除"
+    ref = git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=root).stdout.strip()
+    assert ref == "other/main"
+
+
+def test_folder_custom_pull_command_clears_origin_upstream(tmp_path: Path):
+    """A custom pull command must still drop the `origin/*` upstream.
+
+    Root mode established `origin/main` through `push -u`; after switching to
+    folder mode with a custom pull command, keeping that upstream would let a
+    bare `git push` overwrite the folder layout with local root-layout commits.
+    """
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.sync("push")
+    assert service._upstream(root) == "origin/main"
+
+    service.update_settings(
+        {"remoteDir": "kb", "pullCommand": "git fetch origin"}
+    )
+    result = service.sync("pull")
+    assert result["ok"] is True
+    assert "自定义命令" in result["message"]
+    assert service._upstream(root) == "", "自定义拉取命令路径也应解除 origin/* upstream"
+    with pytest.raises(subprocess.CalledProcessError):
+        git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=root)
+
+
+def test_init_fresh_repo_clears_folder_marker(tmp_path: Path):
+    """A fresh `init_repo` resets the remembered folder-mode marker.
+
+    The marker is the only guard left after `refs/kl` are gone. Recreating the
+    repository from scratch must clear it, otherwise every later root-mode sync
+    is refused with `git_mode_switch` even though no folder history remains.
+    """
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+    assert service.settings().get("folderSyncUsed") is True
+
+    shutil.rmtree(root / ".git")
+    service.init_repo(str(remote))
+
+    assert service.settings().get("folderSyncUsed") is False, "全新初始化应清除目录模式标记"
+    status = service.status()
+    assert status["modeSwitchWarning"] == ""
+    try:
+        result = service.sync("pull")
+    except ApiError as exc:
+        if exc.code == "git_mode_switch":
+            pytest.fail("全新初始化后根目录模式不应再被 git_mode_switch 拦截")
+        raise
+    assert result["ok"] is True
+
+
+def test_folder_marker_ignores_non_boolean_setting(tmp_path: Path):
+    """A hand-edited string "false" must not be treated as folder mode used."""
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.sync("push")
+
+    # Simulate settings.json being edited by hand: `"false"` is truthy in
+    # Python, so a bare bool() would wrongly block root-mode syncing.
+    service.config.patch_git_state({"folderSyncUsed": "false"})
+    status = service.status()
+    assert status["modeSwitchWarning"] == "", "非布尔 folderSyncUsed 不应触发模式切换警告"
+
+    edit_remote_file(
+        remote, tmp_path, "第一文库/01-基础.md", "# 01 · 基础\n\n远端非布尔标记\n"
+    )
+    try:
+        result = service.sync("pull")
+    except ApiError as exc:
+        if exc.code == "git_mode_switch":
+            pytest.fail("非布尔 folderSyncUsed 不应阻塞同步")
+        raise
+    assert result["ok"] is True
+    assert "远端非布尔标记" in (root / "第一文库" / "01-基础.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_folder_stale_current_pid_lock_does_not_block(tmp_path: Path):
+    """A probe index/lock left behind by *this* PID must not block a pull."""
+    root, remote = make_library(tmp_path)
+    service = make_service(tmp_path, root)
+    service.init_repo(str(remote))
+    service.update_settings({"remoteDir": "kb"})
+    service.sync("push")
+
+    probe_index = root / ".git" / f"kl-probe-{os.getpid()}.index"
+    probe_lock = probe_index.with_name(probe_index.name + ".lock")
+    probe_index.write_text("stale probe index\n", encoding="utf-8")
+    probe_lock.write_text("stale probe lock\n", encoding="utf-8")
+
+    edit_remote_file(
+        remote, tmp_path, "kb/第一文库/01-基础.md", "# 01 · 基础\n\n远端新内容\n"
+    )
+    try:
+        result = service.sync("pull")
+    except ApiError as exc:
+        pytest.fail(f"当前进程残留的 probe 索引/锁不应阻断拉取，实际 {exc.code}: {exc.message}")
+    assert result["ok"] is True
+    assert result["pulled"] is True
+    assert "远端新内容" in (root / "第一文库" / "01-基础.md").read_text(encoding="utf-8")
+    assert not probe_index.exists(), "拉取后应清理当前进程的 probe 索引"
+    assert not probe_lock.exists(), "拉取后应清理当前进程的 probe 锁"
+    status = service.status()
+    assert status["conflicts"] == []
+    assert status["mergeInProgress"] is False
+    assert status["dirty"] is False
