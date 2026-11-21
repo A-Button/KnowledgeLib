@@ -4,7 +4,7 @@
 
 后端 Python 3.11+ / FastAPI / Uvicorn / httpx（uv 管理，默认 USTC 镜像）；前端原生 HTML / CSS / JavaScript，无构建步骤、无外部 CDN 与外部字体；测试用 pytest + 本地 Python Mock 上游，全程离线，不接触真实 API Key。
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white) ![Tests](https://img.shields.io/badge/pytest-88%20offline%20tests-0A9EDC?logo=pytest&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-2ea44f)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white) ![Tests](https://img.shields.io/badge/pytest-112%20offline%20tests-0A9EDC?logo=pytest&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-2ea44f)
 
 ## 目录
 
@@ -149,6 +149,8 @@ DeepSeek 对 client tools 与服务端工具的组合有硬限制：**函数工�
 
 同步设置写入用户配置 settings.json 的 git 段（不再使用 git-sync.json）；remote 存在知识库根目录的 .git/config。指定「仓库内目录」时，内置同步会在本地 `refs/kl/base`、`refs/kl/tip`、`refs/kl/local` 记录远端目录快照与同步进度，用于三路合并和领先 / 落后计数；这些引用只存在本地仓库；重新保存 remote 会清空它们（切换远端或仓库被重建、强推后，用重新保存 remote 重置同步快照）。远端历史被替换时会拒绝同步而不是删除本地文件。服务端设置 GIT_TERMINAL_PROMPT=0，需要交互输入密码时直接失败，避免后台任务挂起。
 
+从根目录模式切换到「仓库内目录」后，远端原有根目录内容会保留（相当于多一份副本）；把「仓库内目录」改名或清空，也会在远端和本地留下旧目录。这些旧副本不会自动删除，确认无用后可手工整理。
+
 ## 配置与数据
 
 配置文件在用户目录，不写进项目目录：Windows 为 `%APPDATA%\KnowledgeLib\settings.json`，macOS / Linux 为 `~/.config/knowledgelib/settings.json`（遵循 `XDG_CONFIG_HOME`）；可用 `--config-dir` 或 `KL_CONFIG_DIR` 覆盖，旧版 `data/settings.json` 在首次启动时自动复制迁移。Git 同步设置保存在同一个 `settings.json` 的 `git` 段（不再使用 `git-sync.json`）。Key 在接口中只返回掩码，文件写入后尽力 `chmod 600`；坏 JSON 会自动备份为 `settings.json.corrupt-<时间戳>` 并重建默认配置。
@@ -196,7 +198,7 @@ data/
 
 ## 测试
 
-全部测试使用本地 Python Mock 上游与临时本地 Git 裸仓库（`tests/mock_upstream.py`），只监听 `127.0.0.1`，不访问外网与托管远端；当前共 **104 个 pytest 用例**。
+全部测试使用本地 Python Mock 上游与临时本地 Git 裸仓库（`tests/mock_upstream.py`），只监听 `127.0.0.1`，不访问外网与托管远端；当前共 **112 个 pytest 用例**。
 
 ```bash
 uv run pytest -q                    # 全量用例

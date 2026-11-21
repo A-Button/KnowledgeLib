@@ -279,9 +279,11 @@ class GitService:
         data = dict(self.config.git_settings())
         try:
             data["remoteDir"] = validate_remote_dir(data.get("remoteDir", ""))
-        except ApiError:
+        except ApiError as exc:
             # A hand-edited settings.json must never drive git commands directly.
+            # Keep the error visible instead of silently switching to root mode.
             data["remoteDir"] = ""
+            data["remoteDirError"] = exc.message
         return data
 
     def update_settings(self, patch: Mapping[str, Any]) -> dict[str, Any]:
@@ -521,6 +523,7 @@ class GitService:
             "managed": False,
             "root": str(root),
             "remoteDir": remote_dir,
+            "remoteDirError": str(settings.get("remoteDirError") or ""),
             "folderMode": bool(remote_dir),
             "kbCount": self._kb_count(root),
             "legacyRepos": self._legacy_repos(root),
@@ -623,7 +626,11 @@ class GitService:
         _, tip_ref, local_ref = self._folder_refs(branch, remote_dir, remote_url)
         local_marker = self._rev(root, local_ref)
         if local_marker:
-            code, out, _ = self._run(["rev-list", "--count", f"{local_ref}..HEAD"], root, timeout=20)
+            code, out, _ = self._run(
+                ["rev-list", "--first-parent", "--count", f"{local_ref}..HEAD"],
+                root,
+                timeout=20,
+            )
             if code == 0 and out.strip().isdigit():
                 result["ahead"] = int(out.strip())
         remote_tip = self._rev(root, tip_ref)
@@ -765,6 +772,12 @@ class GitService:
         trigger: str,
         settings: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if settings.get("remoteDirError"):
+            raise ApiError(
+                409,
+                "git_settings_invalid",
+                f"「仓库内目录」设置不合法：{settings['remoteDirError']}；请重新填写并保存同步设置",
+            )
         self._ensure_repo(kb_dir)
         if self._legacy_repos(kb_dir):
             raise ApiError(
@@ -818,7 +831,14 @@ class GitService:
                 summary.append(pull["message"])
 
         if direction in ("push", "sync"):
-            push = self._push(kb_dir, branch, settings, remote, remote_dir)
+            # A custom pull command may not fetch, so only reuse the refs when
+            # the built-in pull path already ran `git fetch`.
+            can_reuse_fetch = direction == "sync" and not (
+                (settings.get("pullCommand") or "").strip()
+            )
+            push = self._push(
+                kb_dir, branch, settings, remote, remote_dir, skip_fetch=can_reuse_fetch
+            )
             if push.get("message"):
                 summary.append(push["message"])
 
@@ -959,24 +979,35 @@ class GitService:
         remote_url: str,
         remote_commit: str,
         remote_tree: str,
+        advance_local: bool = True,
     ) -> None:
-        """Remember the remote tree root so the next pull has a merge base."""
+        """Remember the remote tree root so the next pull has a merge base.
+
+        `advance_local` must stay False on pull-only paths: the local content is
+        not on the remote yet, so the local sync marker must not claim it is.
+        A snapshot commit is reused when the remote tree did not change.
+        """
         base_ref, tip_ref, local_ref = self._folder_refs(branch, remote_dir, remote_url)
         old_base = self._rev(kb_dir, base_ref)
-        args = ["commit-tree", remote_tree]
-        if old_base:
-            args += ["-p", old_base]
-        args += ["-m", f"KnowledgeLib: remote snapshot {remote_dir}"]
-        code, out, err = self._run(args, kb_dir, timeout=30)
-        snapshot = out.strip() if code == 0 else ""
-        if not snapshot:
-            raise ApiError(500, "git_sync_failed", f"记录远端目录快照失败：{_tail(err or out)}")
-        self._update_ref(kb_dir, base_ref, snapshot)
-        if remote_commit:
+        old_base_tree = self._rev(kb_dir, f"{base_ref}^{{tree}}") if old_base else ""
+        if old_base and old_base_tree == remote_tree:
+            snapshot = old_base
+        else:
+            args = ["commit-tree", remote_tree]
+            if old_base:
+                args += ["-p", old_base]
+            args += ["-m", f"KnowledgeLib: remote snapshot {remote_dir}"]
+            code, out, err = self._run(args, kb_dir, timeout=30)
+            snapshot = out.strip() if code == 0 else ""
+            if not snapshot:
+                raise ApiError(500, "git_sync_failed", f"记录远端目录快照失败：{_tail(err or out)}")
+            self._update_ref(kb_dir, base_ref, snapshot)
+        if remote_commit and self._rev(kb_dir, tip_ref) != remote_commit:
             self._update_ref(kb_dir, tip_ref, remote_commit)
-        head = self._rev(kb_dir, "HEAD")
-        if head:
-            self._update_ref(kb_dir, local_ref, head)
+        if advance_local:
+            head = self._rev(kb_dir, "HEAD")
+            if head and self._rev(kb_dir, local_ref) != head:
+                self._update_ref(kb_dir, local_ref, head)
 
     def _remember_resolved_remote(
         self, kb_dir: Path, branch: str, remote_dir: str, remote_url: str
@@ -987,7 +1018,13 @@ class GitService:
             return
         remote_tree = self._rev(kb_dir, f"{remote_ref}:{remote_dir}") or self._empty_tree(kb_dir)
         self._record_folder_state(
-            kb_dir, branch, remote_dir, remote_url, remote_commit, remote_tree
+            kb_dir,
+            branch,
+            remote_dir,
+            remote_url,
+            remote_commit,
+            remote_tree,
+            advance_local=self._rev(kb_dir, "HEAD^{tree}") == remote_tree,
         )
 
     def _build_remote_tree(self, kb_dir: Path, remote_commit: str, remote_dir: str) -> str:
@@ -1086,6 +1123,8 @@ class GitService:
             if desired is None:
                 self._run(["rm", "-f", "--ignore-unmatch", "--", path], kb_dir, timeout=30)
             else:
+                # Type changes (blob <-> symlink) keep both stages, so the
+                # chosen side has to be written explicitly here.
                 self._run(["checkout", f"--{side}", "--", path], kb_dir, timeout=30)
                 self._run(["add", "--", path], kb_dir, timeout=30)
             resolved += 1
@@ -1141,11 +1180,36 @@ class GitService:
             # The user resolved a conflict manually, or this is our own merge
             # commit; the remote side is already part of HEAD.
             self._record_folder_state(
-                kb_dir, branch, remote_dir, remote_url, remote_commit, remote_tree
+                kb_dir,
+                branch,
+                remote_dir,
+                remote_url,
+                remote_commit,
+                remote_tree,
+                advance_local=self._rev(kb_dir, "HEAD^{tree}") == remote_tree,
             )
             return {"pulled": False, "message": f"远端目录已合并到本地（origin/{branch}:{remote_dir}/）"}
-        head_tree = self._rev(kb_dir, "HEAD^{tree}")
         self._ensure_identity(kb_dir)
+        if not self._rev(kb_dir, "HEAD"):
+            code, out, err = self._run(
+                [
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "KnowledgeLib: initialize repository",
+                ],
+                kb_dir,
+                timeout=60,
+            )
+            if code != 0:
+                raise ApiError(
+                    500,
+                    "git_sync_failed",
+                    f"初始化空仓库提交失败：{_tail(err or out)}",
+                )
+        head_tree = self._rev(kb_dir, "HEAD^{tree}")
         code, out, err = self._run(["read-tree", "--reset", "-u", "HEAD"], kb_dir, timeout=60)
         if code != 0:
             raise ApiError(409, "git_pull_failed", f"重置工作区失败：{_tail(err or out)}")
@@ -1208,7 +1272,13 @@ class GitService:
                 self._run(["update-index", "--refresh"], kb_dir, timeout=30)
                 pulled = True
         self._record_folder_state(
-            kb_dir, branch, remote_dir, remote_url, remote_commit, remote_tree
+            kb_dir,
+            branch,
+            remote_dir,
+            remote_url,
+            remote_commit,
+            remote_tree,
+            advance_local=self._rev(kb_dir, "HEAD^{tree}") == remote_tree,
         )
         message = f"已从 origin/{branch}:{remote_dir}/ 同步"
         if removed:
@@ -1229,11 +1299,13 @@ class GitService:
         branch: str,
         remote_url: str,
         remote_dir: str,
+        skip_fetch: bool = False,
     ) -> dict[str, Any]:
         self._ensure_identity(kb_dir)
-        code, out, err = self._run(["fetch", "origin", "--prune"], kb_dir, timeout=180)
-        if code != 0:
-            raise self._remote_error("git_fetch_failed", "拉取远端失败", out, err, remote_url)
+        if not skip_fetch:
+            code, out, err = self._run(["fetch", "origin", "--prune"], kb_dir, timeout=180)
+            if code != 0:
+                raise self._remote_error("git_fetch_failed", "拉取远端失败", out, err, remote_url)
         remote_ref = f"refs/remotes/origin/{branch}"
         remote_commit = self._rev(kb_dir, remote_ref)
         empty_tree = self._empty_tree(kb_dir)
@@ -1407,6 +1479,7 @@ class GitService:
         settings: Mapping[str, Any],
         remote_url: str,
         remote_dir: str = "",
+        skip_fetch: bool = False,
     ) -> dict[str, Any]:
         custom = (settings.get("pushCommand") or "").strip()
         if custom:
@@ -1416,7 +1489,9 @@ class GitService:
                 raise self._remote_error("git_push_failed", "自定义推送命令失败", out, err, remote_url)
             return {"message": "已用自定义命令推送"}
         if remote_dir:
-            return self._push_folder(kb_dir, branch, remote_url, remote_dir)
+            return self._push_folder(
+                kb_dir, branch, remote_url, remote_dir, skip_fetch=skip_fetch
+            )
         code, out, err = self._run(["push", "-u", "origin", branch], kb_dir, timeout=180)
         if code != 0:
             text = (out + "\n" + err).lower()

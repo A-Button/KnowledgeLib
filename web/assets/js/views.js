@@ -464,11 +464,15 @@
     } else {
       var last = git.lastCommit;
       var lastText = last ? (esc(last.short) + ' · ' + esc(last.subject) + ' · ' + KL.ui.relativeTime(last.at)) : '还没有提交';
-      var upstreamText = git.upstream ? '跟踪 ' + esc(git.upstream) : '未设置上游分支';
+      var upstreamText = git.upstream ? (git.folderMode ? '远端分支 ' : '跟踪 ') + esc(git.upstream) : '未设置上游分支';
       var ahead = git.ahead == null ? '—' : git.ahead;
       var behind = git.behind == null ? '—' : git.behind;
       var syncText = git.upstream ? ('↑' + ahead + ' · ↓' + behind) : '—';
       var conflictHtml = '';
+      if (git.remoteDirError) {
+        conflictHtml += '<div class="git-warning"><strong>同步设置不合法</strong><span>' + esc(git.remoteDirError)
+          + '；请重新填写并保存「仓库内目录」，否则不会执行同步。</span></div>';
+      }
       if (git.conflicts && git.conflicts.length) {
         conflictHtml = '<div class="git-warning"><strong>有未解决的冲突</strong><span>' + esc(gitConflictText(git))
           + '。当前策略：' + esc(gitStrategyLabel(settings.strategy)) + '。切换策略后再次同步，或手工解决。</span></div>';
